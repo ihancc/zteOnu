@@ -10,3 +10,20 @@ gen
 *.test
 *.out
 go.work
+.DS_Store
+.zcode
+
+# Android build outputs / machine-specific
+android/.gradle/
+android/build/
+android/app/build/
+android/captures/
+android/.cxx/
+android/local.properties
+# gomobile-generated library (rebuilt by build-apk.ps1 / CI)
+android/app/libs/*.aar
+*.apk
+*.aab
+# signing material - never commit
+*.jks
+*.keystore

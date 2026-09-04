@@ -1,29 +1,16 @@
 package factory
 
 import (
-	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/go-resty/resty/v2"
-
-	"github.com/thank243/zteOnu/utils"
+	"github.com/septrum101/zteOnu/app/crypto"
 )
-
-func New(user string, passwd string, ip string, port int) *Factory {
-	return &Factory{
-		user:   user,
-		passwd: passwd,
-		ip:     ip,
-		port:   port,
-		cli: resty.New().SetHeader("User-Agent", "curl/8.8.0-DEV").
-			SetBaseURL(fmt.Sprintf("http://%s:%d", ip, port)),
-	}
-}
 
 func (f *Factory) reset() error {
 	// active onu web service first, increase the chances of success
@@ -35,7 +22,9 @@ func (f *Factory) reset() error {
 	if err != nil {
 		return err
 	}
-	if resp.StatusCode() == 400 {
+	// 400 means the stale session was reset; when the device is already in a
+	// factory session it answers 200 with an empty body, which is equally fine.
+	if resp.StatusCode() == 400 || (resp.StatusCode() == 200 && resp.String() == "") {
 		return nil
 	}
 
@@ -44,10 +33,10 @@ func (f *Factory) reset() error {
 
 func (f *Factory) reqFactoryMode() error {
 	_, err := f.cli.R().SetBody("RequestFactoryMode.gch").Post("webFac")
-	if err != nil {
-		if err.(*url.Error).Err.Error() != "EOF" {
-			return err
-		}
+	// The device accepts the request by closing the connection, which surfaces
+	// as an EOF error; any other transport failure is real.
+	if err != nil && !errors.Is(err, io.EOF) {
+		return err
 	}
 	return nil
 }
@@ -56,9 +45,9 @@ func (f *Factory) sendSq() (uint8, error) {
 	var version uint8
 
 	r := time.Now().Second()
-	resp, err := f.cli.R().SetBody(fmt.Sprintf("SendSq.gch?rand=%d", r)).Post("webFac")
+	resp, err := f.cli.R().SetBody(fmt.Sprintf("SendSq.gch?rand=%d\r\n", r)).Post("webFac")
 	if err != nil {
-		fmt.Println(err)
+		return 0, err
 	}
 	if resp.StatusCode() != 200 {
 		return 0, errors.New(resp.String())
@@ -81,7 +70,7 @@ func (f *Factory) sendSq() (uint8, error) {
 func (f *Factory) checkLoginAuth() error {
 	command := fmt.Sprintf("CheckLoginAuth.gch?&version61&user=%s&pass=%s", f.user, f.passwd)
 
-	payload, err := utils.ECBEncrypt(
+	payload, err := crypto.ECBEncrypt(
 		[]byte(command), f.key)
 	if err != nil {
 		return err
@@ -93,7 +82,7 @@ func (f *Factory) checkLoginAuth() error {
 	}
 	switch resp.StatusCode() {
 	case 200:
-		if _, err := utils.ECBDecrypt(resp.Body(), f.key); err != nil {
+		if _, err := crypto.ECBDecrypt(resp.Body(), f.key); err != nil {
 			return err
 		}
 		return nil
@@ -106,15 +95,13 @@ func (f *Factory) checkLoginAuth() error {
 	}
 }
 
-func (f *Factory) sendInfo() error {
+// sendInfo sends the SendInfo payload for a single candidate MAC; the device
+// answers HTTP 200 only for a MAC it associates with this client.
+func (f *Factory) sendInfo(mac [6]byte) error {
 	command := []byte("SendInfo.gch?info=12|")
-	magicBytes, err := base64.StdEncoding.DecodeString(magicBytesBase64)
-	if err != nil {
-		return err
-	}
-	command = append(command, magicBytes...)
+	command = append(command, MacToMagicBytes(mac)...)
 
-	payload, err := utils.ECBEncrypt(command, f.key)
+	payload, err := crypto.ECBEncrypt(command, f.key)
 	if err != nil {
 		return err
 	}
@@ -122,7 +109,6 @@ func (f *Factory) sendInfo() error {
 	if err != nil {
 		return err
 	}
-
 	switch resp.StatusCode() {
 	case 200:
 		return nil
@@ -138,7 +124,7 @@ func (f *Factory) sendInfo() error {
 func (f *Factory) factoryMode() (user string, pass string, err error) {
 	command := "FactoryMode.gch?mode=2&user=notused"
 
-	payload, err := utils.ECBEncrypt([]byte(command), f.key)
+	payload, err := crypto.ECBEncrypt([]byte(command), f.key)
 	if err != nil {
 		return
 	}
@@ -146,8 +132,11 @@ func (f *Factory) factoryMode() (user string, pass string, err error) {
 	if err != nil {
 		return
 	}
+	if resp.StatusCode() != 200 {
+		return "", "", fmt.Errorf("unexpected status %d: %s", resp.StatusCode(), resp.String())
+	}
 
-	dec, err := utils.ECBDecrypt(resp.Body(), f.key)
+	dec, err := crypto.ECBDecrypt(resp.Body(), f.key)
 	if err != nil {
 		return
 	}
@@ -160,94 +149,69 @@ func (f *Factory) factoryMode() (user string, pass string, err error) {
 	q := u.Query()
 	user = q.Get("user")
 	pass = q.Get("pass")
+	if user == "" || pass == "" {
+		return "", "", fmt.Errorf("factory mode response carries no credentials: %q", string(dec))
+	}
 
 	return
 }
 
-func (f *Factory) handle() (tlUser string, tlPass string, err error) {
-	fmt.Println(strings.Repeat("-", 35))
-
-	fmt.Print("step [0] reset factory: ")
+func (f *Factory) handle(mac *[6]byte) (tlUser string, tlPass string, err error) {
+	fmt.Fprint(f.log, "步骤 [0] 重置工厂会话：")
 	if err = f.reset(); err != nil {
 		return
-	} else {
-		fmt.Println("ok")
 	}
+	fmt.Fprintln(f.log, "成功")
 
-	fmt.Print("step [1] request factory mode: ")
+	fmt.Fprint(f.log, "步骤 [1] 请求工厂模式：")
 	if err = f.reqFactoryMode(); err != nil {
 		return
-	} else {
-		fmt.Println("ok")
 	}
+	fmt.Fprintln(f.log, "成功")
 
 	var ver uint8
-	fmt.Print("step [2] send sq: ")
+	fmt.Fprint(f.log, "步骤 [2] 发送 sq：")
 	ver, err = f.sendSq()
 	if err != nil {
 		return
-	} else {
-		fmt.Println("ok")
 	}
+	fmt.Fprintln(f.log, "成功")
 
-	fmt.Print("step [3] check login auth: ")
+	fmt.Fprint(f.log, "步骤 [3] 校验登录：")
 	switch ver {
 	case 1:
 		if err = f.checkLoginAuth(); err != nil {
 			return
 		}
 	case 2:
-		if err = f.sendInfo(); err != nil {
+		if mac == nil {
+			err = errors.New("device requires a client MAC (SendInfo)")
+			return
+		}
+		if err = f.sendInfo(*mac); err != nil {
 			return
 		}
 		if err = f.checkLoginAuth(); err != nil {
 			return
 		}
 	}
-	fmt.Println("ok")
+	fmt.Fprintln(f.log, "成功")
 
-	fmt.Print("step [4] enter factory mode: ")
+	fmt.Fprint(f.log, "步骤 [4] 进入工厂模式：")
 	tlUser, tlPass, err = f.factoryMode()
 	if err != nil {
+		fmt.Fprintln(f.log, "失败")
 		return
-	} else {
-		fmt.Println("ok")
 	}
-
-	fmt.Println(strings.Repeat("-", 35))
-
+	fmt.Fprintln(f.log, "成功")
 	return
 }
 
-func (f *Factory) Handle() (tlUser string, tlPass string, err error) {
-	count := 0
-	for {
-		tlUser, tlPass, err = f.handle()
-		if err != nil {
-			count++
-			if count > 10 {
-				return
-			}
-			fmt.Println(err, fmt.Sprintf("Attempt retrying..(%d/10)", count))
-			continue
-		}
-		break
-	}
-
-	return
-}
-
-func getKeyPool(version uint8, r int, newR int) []byte {
-	idx := r
-	keyPool := AesKeyPool[idx : idx+24]
-	if version == 2 {
-		idx = ((0x1000193*r)&0x3F ^ newR) % 60
-		keyPool = AesKeyPoolNew[idx : idx+24]
-	}
-	newKeyPool := make([]byte, len(keyPool))
-	for i := range keyPool {
-		newKeyPool[i] = (keyPool[i] ^ 0xA5) & 0xFF
-	}
-
-	return newKeyPool
+// HandleMAC runs the full webFac flow with the given candidate MAC used for
+// the SendInfo payload and returns the granted temp telnet credentials. The
+// HTTP flow returns credentials even for a MAC the device will not honor over
+// telnet, so the caller must verify each result with an actual telnet login
+// and fall through to the next candidate MAC when it fails.
+func (f *Factory) HandleMAC(mac [6]byte) (tlUser string, tlPass string, err error) {
+	return f.handle(&mac)
 }

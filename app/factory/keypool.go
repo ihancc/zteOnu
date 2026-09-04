@@ -1,12 +1,5 @@
 package factory
 
-import (
-	"github.com/go-resty/resty/v2"
-)
-
-// mac address 00-07-29-55-35-57
-const magicBytesBase64 = "AAAAAGAIAACTBwAAOggAALoAAACQBwAAxAcAAMoGAACVBAAATggAAM0BAAAnCA=="
-
 var (
 	AesKeyPool = []byte{
 		0x7B, 0x56, 0xB0, 0xF7, 0xDA, 0x0E, 0x68, 0x52, 0xC8, 0x19,
@@ -35,11 +28,20 @@ var (
 	}
 )
 
-type Factory struct {
-	user   string
-	passwd string
-	ip     string
-	port   int
-	cli    *resty.Client
-	key    []byte
+// getKeyPool derives the session AES key from the sendSq parameters: r is the
+// second used as the rand, newR the device's "newrand" replay in version-2
+// handshakes. Every key-pool byte is xored with 0xA5.
+func getKeyPool(version uint8, r int, newR int) []byte {
+	idx := r
+	keyPool := AesKeyPool[idx : idx+24]
+	if version == 2 {
+		idx = ((0x1000193*r)&0x3F ^ newR) % 60
+		keyPool = AesKeyPoolNew[idx : idx+24]
+	}
+	newKeyPool := make([]byte, len(keyPool))
+	for i := range keyPool {
+		newKeyPool[i] = (keyPool[i] ^ 0xA5) & 0xFF
+	}
+
+	return newKeyPool
 }
