@@ -14,9 +14,9 @@ import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
-import com.zteonu.core.Logger
-import com.zteonu.core.Session
-import com.zteonu.core.Zteonu
+import com.zteonu.core.zteonu.Logger
+import com.zteonu.core.zteonu.Session
+import com.zteonu.core.zteonu.Zteonu
 import java.io.File
 import kotlin.concurrent.thread
 
