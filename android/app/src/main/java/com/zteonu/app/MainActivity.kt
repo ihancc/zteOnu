@@ -247,52 +247,93 @@ class MainActivity : AppCompatActivity() {
     /** readableMacs scans /sys/class/net for interfaces with a usable MAC. This
      * file read works for USB/Ethernet adapters even when netlink route lookup
      * (auto-detection) is blocked on Android; Wi-Fi MACs are often still hidden. */
+    private fun isRealMac(v: String) =
+        v.length == 17 && v != "00:00:00:00:00:00" && v != "02:00:00:00:00:00"
+
+    private fun ifacePriority(n: String) = when {
+        n.startsWith("eth") || n.startsWith("usb") || n.startsWith("rndis") || n.startsWith("en") -> 0
+        n.startsWith("wlan") -> 2
+        else -> 1
+    }
+
+    /** readableMacs collects usable MACs via two independent mechanisms:
+     * reading /sys/class/net files, and java.net.NetworkInterface. Either may be
+     * blocked on locked-down Android, so both are tried and merged. Wired
+     * interfaces are preferred. */
     private fun readableMacs(): List<Pair<String, String>> {
-        val out = mutableListOf<Pair<String, String>>()
+        val out = linkedMapOf<String, String>()
+
+        // 1) /sys/class/net/<iface>/address
         val names = File("/sys/class/net").list()?.toList()
             ?: listOf("eth0", "eth1", "usb0", "rndis0", "wlan0")
         for (n in names) {
             if (n == "lo") continue
             try {
                 val v = File("/sys/class/net/$n/address").readText().trim().lowercase()
-                if (v.length == 17 && v != "00:00:00:00:00:00" && v != "02:00:00:00:00:00") {
-                    out.add(n to v)
-                }
+                if (isRealMac(v)) out.putIfAbsent(n, v)
             } catch (_: Exception) {
             }
         }
-        // Prefer wired interfaces (the adapter to the ONU) over Wi-Fi.
-        return out.sortedBy { (n, _) ->
-            when {
-                n.startsWith("eth") || n.startsWith("usb") || n.startsWith("rndis") || n.startsWith("en") -> 0
-                n.startsWith("wlan") -> 2
-                else -> 1
+
+        // 2) java.net.NetworkInterface (different code path than the files above)
+        try {
+            val ifaces = java.net.NetworkInterface.getNetworkInterfaces()
+            while (ifaces != null && ifaces.hasMoreElements()) {
+                val nif = ifaces.nextElement()
+                val name = nif.name ?: continue
+                if (name == "lo") continue
+                val ha = try {
+                    nif.hardwareAddress
+                } catch (_: Exception) {
+                    null
+                } ?: continue
+                if (ha.size != 6) continue
+                val mac = ha.joinToString(":") { "%02x".format(it) }
+                if (isRealMac(mac)) out.putIfAbsent(name, mac)
             }
+        } catch (_: Exception) {
         }
+
+        return out.entries.map { it.key to it.value }.sortedBy { ifacePriority(it.first) }
     }
 
-    /** autoFillMac pre-fills the MAC field on launch if a wired MAC is readable. */
+    /** autoFillMac pre-fills the MAC field on launch if a MAC is readable. */
     private fun autoFillMac() {
         if (macEdit.text.isNotBlank()) return
-        val macs = readableMacs()
-        val best = macs.firstOrNull() ?: return
+        val best = readableMacs().firstOrNull() ?: return
         macEdit.setText(best.second)
         appendLog("已自动填入 ${best.first} 的 MAC：${best.second}\r\n")
     }
 
-    /** tryReadMac fills the MAC field from the best readable interface, or tells
-     * the user to enter it manually. */
+    /** tryReadMac fills the MAC field, or logs a diagnostic of the interfaces the
+     * OS exposes so we can see why it is blocked. */
     private fun tryReadMac() {
         val macs = readableMacs()
-        if (macs.isEmpty()) {
-            Toast.makeText(this, "读不到网卡 MAC，请手动填写适配器/本机 MAC", Toast.LENGTH_LONG).show()
+        if (macs.isNotEmpty()) {
+            val best = macs.first()
+            macEdit.setText(best.second)
+            Toast.makeText(this, "读到 ${best.first}: ${best.second}", Toast.LENGTH_LONG).show()
+            appendLog("网卡 MAC：" + macs.joinToString("，") { "${it.first}=${it.second}" } + "\r\n")
             return
         }
-        val best = macs.first()
-        macEdit.setText(best.second)
-        val others = if (macs.size > 1) "（其它：" + macs.drop(1).joinToString("，") { "${it.first} ${it.second}" } + "）" else ""
-        Toast.makeText(this, "读到 ${best.first}: ${best.second} $others", Toast.LENGTH_LONG).show()
-        appendLog("网卡 MAC：" + macs.joinToString("，") { "${it.first}=${it.second}" } + "\r\n")
+        // Diagnostic: which interfaces are even visible, and is the MAC null?
+        val seen = mutableListOf<String>()
+        try {
+            val ifaces = java.net.NetworkInterface.getNetworkInterfaces()
+            while (ifaces != null && ifaces.hasMoreElements()) {
+                val nif = ifaces.nextElement()
+                val ha = try {
+                    nif.hardwareAddress
+                } catch (_: Exception) {
+                    null
+                }
+                seen.add(nif.name + (if (ha == null) ":MAC为空" else ":有MAC"))
+            }
+        } catch (e: Exception) {
+            seen.add("枚举失败:" + (e.message ?: ""))
+        }
+        appendLog("未读到 MAC。可见接口：" + (if (seen.isEmpty()) "无" else seen.joinToString("，")) + "\r\n")
+        Toast.makeText(this, "读不到 MAC，请手动填写（日志里有接口诊断）", Toast.LENGTH_LONG).show()
     }
 
     // ---- helpers ----
