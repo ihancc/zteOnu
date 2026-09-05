@@ -79,7 +79,7 @@ class MainActivity : AppCompatActivity() {
         facPassEdit = addField("工厂密码", "aDm8H%MdA")
         macEdit = addField("自定义 MAC", "", hint = "如 00:07:29:55:35:57")
         addButton("尝试读取本机 MAC") { tryReadMac() }
-        addNote("安卓通常读不到真实 WiFi MAC，请在 设置→WLAN→当前网络 查看该网络的 MAC 并填入上面。")
+        addNote("有线(USB转网口)接光猫：点上面按钮通常能读到网卡(eth0)MAC。WiFi 连接：安卓读不到，请到 设置→WLAN→当前网络 查看 MAC 并手动填。")
 
         // --- One-click ---
         addHeader("一键配置")
@@ -132,6 +132,7 @@ class MainActivity : AppCompatActivity() {
         col.addView(logView)
 
         appendLog("就绪 - 填写参数后操作\r\n")
+        autoFillMac()
     }
 
     // ---- actions ----
@@ -243,21 +244,55 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** tryReadMac best-effort reads the WiFi interface MAC; often blocked on
-     * modern Android, in which case the user must enter it from WiFi settings. */
-    private fun tryReadMac() {
-        for (name in listOf("wlan0", "eth0")) {
+    /** readableMacs scans /sys/class/net for interfaces with a usable MAC. This
+     * file read works for USB/Ethernet adapters even when netlink route lookup
+     * (auto-detection) is blocked on Android; Wi-Fi MACs are often still hidden. */
+    private fun readableMacs(): List<Pair<String, String>> {
+        val out = mutableListOf<Pair<String, String>>()
+        val names = File("/sys/class/net").list()?.toList()
+            ?: listOf("eth0", "eth1", "usb0", "rndis0", "wlan0")
+        for (n in names) {
+            if (n == "lo") continue
             try {
-                val v = File("/sys/class/net/$name/address").readText().trim()
-                if (v.isNotEmpty() && v != "02:00:00:00:00:00") {
-                    macEdit.setText(v)
-                    Toast.makeText(this, "读到 $name: $v", Toast.LENGTH_SHORT).show()
-                    return
+                val v = File("/sys/class/net/$n/address").readText().trim().lowercase()
+                if (v.length == 17 && v != "00:00:00:00:00:00" && v != "02:00:00:00:00:00") {
+                    out.add(n to v)
                 }
             } catch (_: Exception) {
             }
         }
-        Toast.makeText(this, "读不到，请到 设置→WLAN 查看并手动填写", Toast.LENGTH_LONG).show()
+        // Prefer wired interfaces (the adapter to the ONU) over Wi-Fi.
+        return out.sortedBy { (n, _) ->
+            when {
+                n.startsWith("eth") || n.startsWith("usb") || n.startsWith("rndis") || n.startsWith("en") -> 0
+                n.startsWith("wlan") -> 2
+                else -> 1
+            }
+        }
+    }
+
+    /** autoFillMac pre-fills the MAC field on launch if a wired MAC is readable. */
+    private fun autoFillMac() {
+        if (macEdit.text.isNotBlank()) return
+        val macs = readableMacs()
+        val best = macs.firstOrNull() ?: return
+        macEdit.setText(best.second)
+        appendLog("已自动填入 ${best.first} 的 MAC：${best.second}\r\n")
+    }
+
+    /** tryReadMac fills the MAC field from the best readable interface, or tells
+     * the user to enter it manually. */
+    private fun tryReadMac() {
+        val macs = readableMacs()
+        if (macs.isEmpty()) {
+            Toast.makeText(this, "读不到网卡 MAC，请手动填写适配器/本机 MAC", Toast.LENGTH_LONG).show()
+            return
+        }
+        val best = macs.first()
+        macEdit.setText(best.second)
+        val others = if (macs.size > 1) "（其它：" + macs.drop(1).joinToString("，") { "${it.first} ${it.second}" } + "）" else ""
+        Toast.makeText(this, "读到 ${best.first}: ${best.second} $others", Toast.LENGTH_LONG).show()
+        appendLog("网卡 MAC：" + macs.joinToString("，") { "${it.first}=${it.second}" } + "\r\n")
     }
 
     // ---- helpers ----
