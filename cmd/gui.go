@@ -43,12 +43,12 @@ type gui struct {
 	runBtn                                   *walk.PushButton
 
 	// one-click provisioning
-	snEdit, onePassEdit                  *walk.LineEdit
-	ponCB, regionCB                      *walk.ComboBox
-	ensureWANCB, rebootAfterCB           *walk.CheckBox
-	lan1CB, lan2CB, lan3CB, lan4CB       *walk.CheckBox
-	oneBtn                               *walk.PushButton
-	oneStatus                            *walk.Label
+	snEdit, onePassEdit            *walk.LineEdit
+	ponCB, regionCB                *walk.ComboBox
+	ensureWANCB, rebootAfterCB     *walk.CheckBox
+	lan1CB, lan2CB, lan3CB, lan4CB *walk.CheckBox
+	oneBtn                         *walk.PushButton
+	oneStatus                      *walk.Label
 
 	// telnet command console
 	cmdUserEdit, cmdPassEdit, cmdEdit           *walk.LineEdit
