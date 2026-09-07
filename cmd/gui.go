@@ -399,8 +399,7 @@ func runGUI() {
 									},
 									Label{Text: "账号"},
 									LineEdit{
-										AssignTo:  &g.queryAccountEdit,
-										CueBanner: "如 15838372919",
+										AssignTo: &g.queryAccountEdit,
 									},
 								},
 							},
