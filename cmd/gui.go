@@ -70,8 +70,7 @@ type gui struct {
 
 	// 光猫查询 tab (independent of the ONU-side flows above)
 	queryLoginEdit                  *walk.LineEdit
-	queryPonEdit                    *walk.LineEdit
-	queryAccountsEdit               *walk.TextEdit
+	queryAccountEdit                *walk.LineEdit
 	queryRunBtn                     *walk.PushButton
 	querySelAllBtn, querySelNoneBtn *walk.PushButton
 	queryExportBtn, queryClearBtn   *walk.PushButton
@@ -388,39 +387,24 @@ func runGUI() {
 						Title:  "光猫查询",
 						Layout: VBox{},
 						Children: []Widget{
-							GroupBox{
-								Title:  "查询设置",
-								Layout: VBox{},
+							Composite{
+								Layout: Grid{Columns: 6},
 								Children: []Widget{
-									Composite{
-										Layout: Grid{Columns: 4},
-										Children: []Widget{
-											Label{Text: "工号"},
-											LineEdit{
-												AssignTo:   &g.queryLoginEdit,
-												CueBanner:  "loginName，如 tt_wangbang（自动 SSO 换取 JWT，缓存并按需刷新）",
-												ColumnSpan: 3,
-											},
-											Label{Text: "并发线程"},
-											LineEdit{
-												AssignTo: &g.queryConcurrencyEdit,
-												Text:     "4",
-												MaxSize:  Size{Width: 60},
-											},
-											Label{Text: "PON 名（可选，留空返回全部）"},
-											LineEdit{
-												AssignTo:  &g.queryPonEdit,
-												CueBanner: "如 3109.13 或留空",
-											},
-										},
+									Label{Text: "工号"},
+									LineEdit{
+										AssignTo:  &g.queryLoginEdit,
+										CueBanner: "loginName，如 tt_wangbang",
 									},
-									Label{Text: "账号列表（每行一个，可粘贴多行）"},
-									TextEdit{
-										AssignTo: &g.queryAccountsEdit,
-										VScroll:  true,
-										MinSize:  Size{Height: 90},
-										Font:     Font{Family: "NSimSun", PointSize: 10},
-										Text:     "",
+									Label{Text: "并发线程"},
+									LineEdit{
+										AssignTo: &g.queryConcurrencyEdit,
+										Text:     "4",
+										MaxSize:  Size{Width: 60},
+									},
+									Label{Text: "账号"},
+									LineEdit{
+										AssignTo:  &g.queryAccountEdit,
+										CueBanner: "如 15838372919",
 									},
 								},
 							},
@@ -429,7 +413,7 @@ func runGUI() {
 								Children: []Widget{
 									PushButton{
 										AssignTo:  &g.queryRunBtn,
-										Text:      "批量查询",
+										Text:      "查询",
 										OnClicked: g.onQueryRun,
 									},
 									PushButton{
@@ -838,29 +822,24 @@ func parseAccounts(text string) []string {
 	return out
 }
 
-// onQueryRun runs scene/security/forward concurrently for each account.
-// Auth path: 工号 → cached JWT (if fresh) or SSO exchange → RSA-encrypted POST.
-// Rows are streamed into the table as each account completes.
+// onQueryRun queries scene/security/forward for one account and expands the
+// response into a set of same-PON neighbor rows. Auth path: 工号 → cached JWT
+// (if fresh) or fresh SSO exchange → RSA-encrypted POST.
 func (g *gui) onQueryRun() {
 	if g.queryBusy {
 		return
 	}
 	loginName := strings.TrimSpace(g.queryLoginEdit.Text())
-	accounts := parseAccounts(g.queryAccountsEdit.Text())
+	account := strings.TrimSpace(g.queryAccountEdit.Text())
 	if loginName == "" {
 		walk.MsgBox(g.mw, "提示", "请先填写工号 (loginName)", walk.MsgBoxIconWarning)
 		return
 	}
-	if len(accounts) == 0 {
-		walk.MsgBox(g.mw, "提示", "账号列表为空", walk.MsgBoxIconWarning)
+	if account == "" {
+		walk.MsgBox(g.mw, "提示", "请填写账号", walk.MsgBoxIconWarning)
 		return
 	}
 	saveLoginName(loginName)
-
-	concurrency := atoiDefault(g.queryConcurrencyEdit.Text(), 4)
-	if concurrency > 20 {
-		concurrency = 20
-	}
 
 	g.queryBusy = true
 	g.queryRunBtn.SetEnabled(false)
@@ -875,67 +854,37 @@ func (g *gui) onQueryRun() {
 			g.mw.Synchronize(func() {
 				g.queryBusy = false
 				g.queryRunBtn.SetEnabled(true)
-				g.queryRunBtn.SetText("批量查询")
+				g.queryRunBtn.SetText("查询")
 				g.queryHint.SetText("SSO 失败：" + err.Error())
 			})
 			return
 		}
-		g.mw.Synchronize(func() {
-			g.queryHint.SetText(fmt.Sprintf("token 已就绪，共 %d 个账号，并发 %d……", len(accounts), concurrency))
-		})
 
 		client, err := query.NewForwardClient(tok)
 		if err != nil {
 			g.mw.Synchronize(func() {
 				g.queryBusy = false
 				g.queryRunBtn.SetEnabled(true)
-				g.queryRunBtn.SetText("批量查询")
+				g.queryRunBtn.SetText("查询")
 				g.queryHint.SetText("初始化查询客户端失败：" + err.Error())
 			})
 			return
 		}
-		// On 401 the client asks TokenProvider for a fresh token; here we
-		// invalidate the disk cache first so we don't loop on a stale JWT.
+		// On 401 the client asks TokenProvider for a fresh token; invalidate
+		// the disk cache first so we don't loop on a stale JWT.
 		client.TokenProvider = func() (string, error) {
 			sso.Invalidate(tokenCachePath())
 			return sso.EnsureToken(loginName, tokenCachePath(), ssoCli)
 		}
 
-		ponName := strings.TrimSpace(g.queryPonEdit.Text())
-
-		// Bounded-concurrency worker pool. Each account expands to multiple
-		// rows (one per neighbor ONU on its PON), so we batch-append per query.
-		type acctResult struct{ rows []*QueryRow }
-		sem := make(chan struct{}, concurrency)
-		done := make(chan acctResult, len(accounts))
-		for _, acct := range accounts {
-			acct := acct
-			sem <- struct{}{}
-			go func() {
-				defer func() { <-sem }()
-				resp, qerr := client.QueryOneWithPon(acct, ponName)
-				done <- acctResult{buildQueryRowsFromForward(acct, resp, qerr)}
-			}()
-		}
-		completed := 0
-		total := 0
-		for range accounts {
-			r := <-done
-			completed++
-			total += len(r.rows)
-			cnt := completed
-			tot := total
-			rows := r.rows
-			g.mw.Synchronize(func() {
-				g.queryModel.AppendMany(rows)
-				g.queryHint.SetText(fmt.Sprintf("已完成 %d/%d 账号，共 %d 台设备", cnt, len(accounts), tot))
-			})
-		}
+		resp, qerr := client.QueryOneWithPon(account, "")
+		rows := buildQueryRowsFromForward(account, resp, qerr)
 		g.mw.Synchronize(func() {
+			g.queryModel.AppendMany(rows)
 			g.queryBusy = false
 			g.queryRunBtn.SetEnabled(true)
-			g.queryRunBtn.SetText("批量查询")
-			g.queryHint.SetText(fmt.Sprintf("完成：%d 个账号，共 %d 台设备", len(accounts), total))
+			g.queryRunBtn.SetText("查询")
+			g.queryHint.SetText(fmt.Sprintf("完成：共 %d 台设备", len(rows)))
 		})
 	}()
 }
