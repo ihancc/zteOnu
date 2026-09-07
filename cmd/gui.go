@@ -45,7 +45,7 @@ type gui struct {
 	// one-click provisioning
 	snEdit, onePassEdit                  *walk.LineEdit
 	ponCB, regionCB                      *walk.ComboBox
-	reopenCB, ensureWANCB, rebootAfterCB *walk.CheckBox
+	ensureWANCB, rebootAfterCB           *walk.CheckBox
 	lan1CB, lan2CB, lan3CB, lan4CB       *walk.CheckBox
 	oneBtn                               *walk.PushButton
 	oneStatus                            *walk.Label
@@ -198,11 +198,6 @@ func runGUI() {
 												CurrentIndex: onu.RegionIndexByID(onu.DefaultRegionID),
 											},
 										},
-									},
-									CheckBox{
-										AssignTo: &g.reopenCB,
-										Text:     "完成后再获取一次临时 telnet 验证（多等一次重启）",
-										Checked:  false,
 									},
 									CheckBox{
 										AssignTo: &g.ensureWANCB,
@@ -534,7 +529,6 @@ func (g *gui) onOneClick() {
 		Password:          pass,
 		PON:               onu.PONType(g.ponCB.CurrentIndex()),
 		RegionID:          onu.Regions[g.regionCB.CurrentIndex()].ID,
-		ReopenTelnet:      g.reopenCB.Checked(),
 		EnsureWAN:         g.ensureWANCB.Checked(),
 		BridgePortMask:    mask,
 		RebootAfterEnsure: g.rebootAfterCB.Checked(),

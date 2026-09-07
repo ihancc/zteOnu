@@ -88,7 +88,7 @@ class MainActivity : AppCompatActivity() {
         ponSpinner = addSpinner("类型", listOf("GPON", "XGPON"))
         regionSpinner = addSpinner("区域", regionNames())
         regionSpinner.setSelection(Zteonu.defaultRegionIndex().toInt())
-        reopenCheck = addCheckBox("完成后重新开启 telnet（便于重连）", true)
+        reopenCheck = addCheckBox("完成后检查/创建 4034 TR069 与 4031 桥接（LAN1-4 全绑）", true)
         addButton("一键配置") { onOneClick() }
 
         // --- Manual permanent telnet ---
@@ -149,14 +149,20 @@ class MainActivity : AppCompatActivity() {
         val pass = passEdit.text.toString().trim()
         val xgpon = ponSpinner.selectedItemPosition == 1
         val regionID = Zteonu.regionIDAt(regionSpinner.selectedItemPosition.toLong())
-        val reopen = reopenCheck.isChecked
+        // The old "reopen for verification" checkbox is repurposed as
+        // "check/create 4034+4031 WAN connections after the region reboot".
+        // bind all four LAN ports on the 4031 bridge (PortMask=15) by default;
+        // and reboot once more so the new WAN entries take effect.
+        val ensureWAN = reopenCheck.isChecked
+        val bridgePortMask = 15L
+        val rebootAfter = true
 
         logView.text = ""
         thread {
             try {
                 Zteonu.runOneClick(
                     ip, httpPort, telnetPort, facUser, facPass, mac,
-                    sn, pass, xgpon, regionID, reopen, uiLogger
+                    sn, pass, xgpon, regionID, ensureWAN, bridgePortMask, rebootAfter, uiLogger
                 )
             } catch (e: Exception) {
                 runOnUiThread { appendLog("[错误] " + (e.message ?: e.toString()) + "\r\n") }

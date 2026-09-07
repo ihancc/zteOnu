@@ -91,11 +91,14 @@ func OpenPermanentTelnet(ip string, httpPort int, telnetPort int, facUser string
 
 // --- One-click provisioning ---
 
-// RunOneClick runs the full one-click flow: ensure permanent telnet, set 集采,
-// write SN/password, set region and reboot. xgpon selects XGPON (false = GPON);
-// reopenTelnet re-opens permanent telnet after the final reboot. Progress is
+// RunOneClick runs the full one-click flow: open temp telnet, set 集采, write
+// SN/password, set region+reboot, then optionally check/create the 4034 TR-069
+// and 4031 bridge WAN connections. xgpon selects XGPON (false = GPON);
+// ensureWAN turns on step 5 (check + create); bridgePortMask picks the LAN
+// ports of the 4031 bridge (bit0=LAN1..bit3=LAN4, 15 = all four); rebootAfter
+// reboots once more so the new WAN connections take effect. Progress is
 // streamed to log.
-func RunOneClick(ip string, httpPort int, telnetPort int, facUser string, facPass string, mac string, sn string, password string, xgpon bool, regionID int, reopenTelnet bool, log Logger) error {
+func RunOneClick(ip string, httpPort int, telnetPort int, facUser string, facPass string, mac string, sn string, password string, xgpon bool, regionID int, ensureWAN bool, bridgePortMask int, rebootAfter bool, log Logger) error {
 	pon := onu.GPON
 	if xgpon {
 		pon = onu.XGPON
@@ -105,11 +108,13 @@ func RunOneClick(ip string, httpPort int, telnetPort int, facUser string, facPas
 			User: facUser, Pass: facPass, IP: ip,
 			HTTPPort: httpPort, TelnetPort: telnetPort, Mac: mac, Log: loggerWriter{log},
 		},
-		SN:           sn,
-		Password:     password,
-		PON:          pon,
-		RegionID:     regionID,
-		ReopenTelnet: reopenTelnet,
+		SN:                sn,
+		Password:          password,
+		PON:               pon,
+		RegionID:          regionID,
+		EnsureWAN:         ensureWAN,
+		BridgePortMask:    bridgePortMask,
+		RebootAfterEnsure: rebootAfter,
 	})
 }
 
