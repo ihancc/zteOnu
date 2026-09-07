@@ -115,3 +115,52 @@ func TestAppendMany(t *testing.T) {
 		t.Errorf("RowCount = %d, want 3", m.RowCount())
 	}
 }
+
+func TestSelectByPredicate_OfflineOnly(t *testing.T) {
+	m := NewQueryTableModel()
+	m.AppendMany([]*QueryRow{
+		{QueryAccount: "a", OperState: "在线"},
+		{QueryAccount: "b", OperState: "掉电"},
+		{QueryAccount: "c", OperState: "未知原因不在线"},
+		{QueryAccount: "d", OperState: "在线"},
+	})
+	m.SelectByPredicate(func(r *QueryRow) bool { return !r.IsOnline() })
+	got := make([]bool, 4)
+	for i, r := range m.Rows() {
+		got[i] = r.Selected
+	}
+	want := []bool{false, true, true, false}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("row %d selected = %v, want %v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestSort_ONUIDNumericAndDescending(t *testing.T) {
+	m := NewQueryTableModel()
+	// ONUIDs "2", "10", "1", "20" - lexical would give "1","10","2","20"
+	// but numeric-aware sort should give "1","2","10","20".
+	m.AppendMany([]*QueryRow{
+		{ONUID: "2"}, {ONUID: "10"}, {ONUID: "1"}, {ONUID: "20"},
+	})
+	if err := m.Sort(1, 0 /* SortAscending */); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"1", "2", "10", "20"}
+	for i, r := range m.Rows() {
+		if r.ONUID != want[i] {
+			t.Errorf("asc row %d = %q, want %q", i, r.ONUID, want[i])
+		}
+	}
+	// Descending order flips.
+	if err := m.Sort(1, 1 /* SortDescending */); err != nil {
+		t.Fatal(err)
+	}
+	wantDesc := []string{"20", "10", "2", "1"}
+	for i, r := range m.Rows() {
+		if r.ONUID != wantDesc[i] {
+			t.Errorf("desc row %d = %q, want %q", i, r.ONUID, wantDesc[i])
+		}
+	}
+}

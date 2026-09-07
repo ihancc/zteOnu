@@ -73,6 +73,7 @@ type gui struct {
 	queryAccountEdit                *walk.LineEdit
 	queryRunBtn                     *walk.PushButton
 	querySelAllBtn, querySelNoneBtn *walk.PushButton
+	querySelOfflineBtn              *walk.PushButton
 	queryExportBtn, queryClearBtn   *walk.PushButton
 	queryHint                       *walk.Label
 	queryTable                      *walk.TableView
@@ -420,6 +421,15 @@ func runGUI() {
 										OnClicked: g.onQuerySelectNone,
 									},
 									PushButton{
+										AssignTo: &g.querySelOfflineBtn,
+										Text:     "选中非在线",
+										OnClicked: func() {
+											g.queryModel.SelectByPredicate(func(r *QueryRow) bool {
+												return !r.IsOnline()
+											})
+										},
+									},
+									PushButton{
 										AssignTo:  &g.queryExportBtn,
 										Text:      "导出选中 CSV",
 										OnClicked: g.onQueryExport,
@@ -444,6 +454,19 @@ func runGUI() {
 								MultiSelection:   true,
 								ColumnsOrderable: true,
 								Model:            g.queryModel,
+								// Non-online rows get a light-red background so
+								// the eye can pick out 掉电 / 未知原因不在线 devices
+								// at a glance.
+								StyleCell: func(style *walk.CellStyle) {
+									idx := style.Row()
+									rows := g.queryModel.Rows()
+									if idx < 0 || idx >= len(rows) {
+										return
+									}
+									if !rows[idx].IsOnline() {
+										style.BackgroundColor = walk.RGB(0xff, 0xe0, 0xe0)
+									}
+								},
 								Columns: []TableViewColumn{
 									{Title: "查询账号", Width: 110},
 									{Title: "ONU 序号", Width: 70},

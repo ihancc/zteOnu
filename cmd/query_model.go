@@ -5,6 +5,8 @@ package cmd
 import (
 	"encoding/csv"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/lxn/walk"
@@ -82,10 +84,18 @@ func itoa(n int) string {
 	return string(buf[i:])
 }
 
+// IsOnline reports whether a row is in the "在线" state. Any other value
+// (掉电 / 未知原因不在线 / 空) counts as offline and is what the UI highlights
+// and what the "选中非在线" button targets.
+func (r *QueryRow) IsOnline() bool { return r.OperState == "在线" }
+
 // QueryTableModel is walk's TableView model backing the results table. It
-// implements walk.TableModel plus walk.ItemChecker so each row has a checkbox.
+// implements walk.TableModel plus walk.ItemChecker so each row has a checkbox,
+// and walk.Sorter (via SorterBase + a custom Sort method) so column headers
+// sort the data on click.
 type QueryTableModel struct {
 	walk.TableModelBase
+	walk.SorterBase
 	rows []*QueryRow
 }
 
@@ -162,6 +172,68 @@ func (m *QueryTableModel) SelectAll(selected bool) {
 	if len(m.rows) > 0 {
 		m.PublishRowsChanged(0, len(m.rows)-1)
 	}
+}
+
+// SelectByPredicate sets each row's Selected to pred(row). Used by
+// "选中非在线" to check offline rows and uncheck the others in one click.
+func (m *QueryTableModel) SelectByPredicate(pred func(*QueryRow) bool) {
+	for _, r := range m.rows {
+		r.Selected = pred(r)
+	}
+	if len(m.rows) > 0 {
+		m.PublishRowsChanged(0, len(m.rows)-1)
+	}
+}
+
+// Sort implements walk.Sorter. Called by the TableView when a column header
+// is clicked. ONU serial is compared as an integer when both sides parse; the
+// other columns fall through to lexical order.
+func (m *QueryTableModel) Sort(col int, order walk.SortOrder) error {
+	sort.SliceStable(m.rows, func(i, j int) bool {
+		a, b := m.rows[i], m.rows[j]
+		less := m.lessAt(a, b, col)
+		if order == walk.SortDescending {
+			return !less
+		}
+		return less
+	})
+	return m.SorterBase.Sort(col, order)
+}
+
+// lessAt reports whether a<b for the given column. Kept separate so the
+// integer-aware branch for ONUID stays readable.
+func (m *QueryTableModel) lessAt(a, b *QueryRow, col int) bool {
+	switch col {
+	case 0:
+		return a.QueryAccount < b.QueryAccount
+	case 1:
+		return cmpIntish(a.ONUID, b.ONUID)
+	case 2:
+		return a.OperState < b.OperState
+	case 3:
+		return a.AuthType < b.AuthType
+	case 4:
+		return a.AuthInfo < b.AuthInfo
+	case 5:
+		return a.CustomersAccount < b.CustomersAccount
+	case 6:
+		return a.LastOffTime < b.LastOffTime
+	case 7:
+		return a.Notes < b.Notes
+	}
+	return false
+}
+
+// cmpIntish returns a<b treating both as ints when they parse cleanly,
+// otherwise falling back to lexical order. Keeps "10" after "2" in the ONU
+// column instead of before it.
+func cmpIntish(a, b string) bool {
+	ai, aerr := strconv.Atoi(a)
+	bi, berr := strconv.Atoi(b)
+	if aerr == nil && berr == nil {
+		return ai < bi
+	}
+	return a < b
 }
 
 // ExportSelectedCSV writes checked rows to path as UTF-8 BOM CSV suitable for
