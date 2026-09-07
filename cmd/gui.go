@@ -70,6 +70,7 @@ type gui struct {
 
 	// 光猫查询 tab (independent of the ONU-side flows above)
 	queryLoginEdit                  *walk.LineEdit
+	queryPonEdit                    *walk.LineEdit
 	queryAccountsEdit               *walk.TextEdit
 	queryRunBtn                     *walk.PushButton
 	querySelAllBtn, querySelNoneBtn *walk.PushButton
@@ -79,6 +80,16 @@ type gui struct {
 	queryModel                      *QueryTableModel
 	queryConcurrencyEdit            *walk.LineEdit
 	queryBusy                       bool
+
+	// 绑定信息 tab (compId=317 single-account view)
+	bindLoginEdit, bindConcurrencyEdit        *walk.LineEdit
+	bindAccountsText                          *walk.TextEdit
+	bindRunBtn, bindSelAllBtn, bindSelNoneBtn *walk.PushButton
+	bindExportBtn, bindClearBtn               *walk.PushButton
+	bindHint                                  *walk.Label
+	bindTable                                 *walk.TableView
+	bindModel                                 *BindInfoTableModel
+	bindBusy                                  bool
 
 	ifaces []factory.InterfaceInfo
 
@@ -112,6 +123,7 @@ func runGUI() {
 	g := &gui{}
 	g.ifaces = factory.Interfaces()
 	g.queryModel = NewQueryTableModel()
+	g.bindModel = NewBindInfoTableModel()
 
 	if err := (MainWindow{
 		AssignTo: &g.mw,
@@ -391,10 +403,14 @@ func runGUI() {
 											},
 											Label{Text: "并发线程"},
 											LineEdit{
-												AssignTo:   &g.queryConcurrencyEdit,
-												Text:       "4",
-												MaxSize:    Size{Width: 60},
-												ColumnSpan: 3,
+												AssignTo: &g.queryConcurrencyEdit,
+												Text:     "4",
+												MaxSize:  Size{Width: 60},
+											},
+											Label{Text: "PON 名（可选，留空返回全部）"},
+											LineEdit{
+												AssignTo:  &g.queryPonEdit,
+												CueBanner: "如 3109.13 或留空",
 											},
 										},
 									},
@@ -452,14 +468,85 @@ func runGUI() {
 								ColumnsOrderable: true,
 								Model:            g.queryModel,
 								Columns: []TableViewColumn{
+									{Title: "查询账号", Width: 110},
+									{Title: "ONU 序号", Width: 70},
+									{Title: "状态", Width: 100},
+									{Title: "认证类型", Width: 70},
+									{Title: "认证信息", Width: 140},
+									{Title: "客户号码", Width: 110},
+									{Title: "最后离线时间", Width: 140},
+									{Title: "备注", Width: 200},
+								},
+							},
+						},
+					},
+					{
+						Title:  "绑定信息查询",
+						Layout: VBox{},
+						Children: []Widget{
+							GroupBox{
+								Title:  "查询设置",
+								Layout: VBox{},
+								Children: []Widget{
+									Composite{
+										Layout: Grid{Columns: 4},
+										Children: []Widget{
+											Label{Text: "工号"},
+											LineEdit{
+												AssignTo:   &g.bindLoginEdit,
+												CueBanner:  "loginName（与光猫查询共享 SSO 缓存）",
+												ColumnSpan: 3,
+											},
+											Label{Text: "并发线程"},
+											LineEdit{
+												AssignTo: &g.bindConcurrencyEdit,
+												Text:     "4",
+												MaxSize:  Size{Width: 60},
+											},
+											Label{Text: "(compId=317, 单账号绑定信息视图)", ColumnSpan: 2},
+										},
+									},
+									Label{Text: "账号列表（每行一个，可粘贴多行）"},
+									TextEdit{
+										AssignTo: &g.bindAccountsText,
+										VScroll:  true,
+										MinSize:  Size{Height: 90},
+										Font:     Font{Family: "NSimSun", PointSize: 10},
+									},
+								},
+							},
+							Composite{
+								Layout: HBox{},
+								Children: []Widget{
+									PushButton{AssignTo: &g.bindRunBtn, Text: "批量查询", OnClicked: g.onBindInfoRun},
+									PushButton{AssignTo: &g.bindSelAllBtn, Text: "全选", OnClicked: func() { g.bindModel.SelectAll(true) }},
+									PushButton{AssignTo: &g.bindSelNoneBtn, Text: "全不选", OnClicked: func() { g.bindModel.SelectAll(false) }},
+									PushButton{AssignTo: &g.bindExportBtn, Text: "导出选中 CSV", OnClicked: g.onBindInfoExport},
+									PushButton{AssignTo: &g.bindClearBtn, Text: "清空", OnClicked: func() { g.bindModel.Reset(); g.bindHint.SetText("已清空") }},
+									Label{
+										AssignTo:  &g.bindHint,
+										Text:      "返回：账号 / 状态 / 用户名 / 带宽 / 地市 / 绑定信息 / 更新时间",
+										TextColor: walk.RGB(0x66, 0x66, 0x66),
+									},
+									HSpacer{},
+								},
+							},
+							TableView{
+								AssignTo:         &g.bindTable,
+								AlternatingRowBG: true,
+								CheckBoxes:       true,
+								MultiSelection:   true,
+								ColumnsOrderable: true,
+								Model:            g.bindModel,
+								Columns: []TableViewColumn{
 									{Title: "账号", Width: 120},
 									{Title: "状态", Width: 60},
 									{Title: "用户名", Width: 110},
 									{Title: "带宽", Width: 130},
 									{Title: "地市", Width: 60},
-									{Title: "绑定信息", Width: 260},
+									{Title: "绑定信息", Width: 300},
 									{Title: "更新时间", Width: 120},
-									{Title: "备注", Width: 220},
+									{Title: "备注", Width: 200},
 								},
 							},
 						},
@@ -814,33 +901,41 @@ func (g *gui) onQueryRun() {
 			return sso.EnsureToken(loginName, tokenCachePath(), ssoCli)
 		}
 
-		// Bounded-concurrency worker pool.
+		ponName := strings.TrimSpace(g.queryPonEdit.Text())
+
+		// Bounded-concurrency worker pool. Each account expands to multiple
+		// rows (one per neighbor ONU on its PON), so we batch-append per query.
+		type acctResult struct{ rows []*QueryRow }
 		sem := make(chan struct{}, concurrency)
-		done := make(chan *QueryRow, len(accounts))
+		done := make(chan acctResult, len(accounts))
 		for _, acct := range accounts {
 			acct := acct
 			sem <- struct{}{}
 			go func() {
 				defer func() { <-sem }()
-				resp, qerr := client.QueryOne(acct)
-				done <- buildQueryRowFromForward(acct, resp, qerr)
+				resp, qerr := client.QueryOneWithPon(acct, ponName)
+				done <- acctResult{buildQueryRowsFromForward(acct, resp, qerr)}
 			}()
 		}
 		completed := 0
+		total := 0
 		for range accounts {
-			row := <-done
+			r := <-done
 			completed++
+			total += len(r.rows)
 			cnt := completed
+			tot := total
+			rows := r.rows
 			g.mw.Synchronize(func() {
-				g.queryModel.Append(row)
-				g.queryHint.SetText(fmt.Sprintf("已完成 %d/%d", cnt, len(accounts)))
+				g.queryModel.AppendMany(rows)
+				g.queryHint.SetText(fmt.Sprintf("已完成 %d/%d 账号，共 %d 台设备", cnt, len(accounts), tot))
 			})
 		}
 		g.mw.Synchronize(func() {
 			g.queryBusy = false
 			g.queryRunBtn.SetEnabled(true)
 			g.queryRunBtn.SetText("批量查询")
-			g.queryHint.SetText(fmt.Sprintf("完成：%d 条", len(accounts)))
+			g.queryHint.SetText(fmt.Sprintf("完成：%d 个账号，共 %d 台设备", len(accounts), total))
 		})
 	}()
 }

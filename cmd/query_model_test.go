@@ -12,43 +12,50 @@ import (
 	"github.com/septrum101/zteOnu/app/query"
 )
 
-func TestBuildQueryRowFromForward(t *testing.T) {
-	// happy path
-	r := buildQueryRowFromForward("15838372919", &query.ForwardResponse{
-		Code: 200, Msg: "OK;OK", Data: &query.ForwardData{
-			UserName:    "15838372919",
-			UserBand:    "300M_40M300M@101",
-			UserNode:    "郑州",
-			OrderStatus: "正常",
-			BindInfo:    "3109.13 172.21.70.84/0/0/19/0/6/CMDCA1F51676 GP",
-			UpdateTime:  "20241003050820",
+func TestBuildQueryRowsFromForward(t *testing.T) {
+	// Happy path: three neighbors on the PON, one of them has \r in the
+	// LASTOFFTIME field (the endpoint sends this on the wire).
+	rows := buildQueryRowsFromForward("15838372919", &query.ForwardResponse{
+		Code: 200, Msg: "操作成功", Data: []query.DeviceItem{
+			{ONUID: "0", OperState: "在线", AuthType: "MAC", AuthInfo: "CMDCA1F51668",
+				LastOffTime: "2026-09-07 00:03:26\r", CustomersAccount: "15036171211"},
+			{ONUID: "2", OperState: "在线", AuthType: "MAC", AuthInfo: "CMDCA1F51676",
+				LastOffTime: "2026-09-07 09:35:29\r", CustomersAccount: "15838372919"},
+			{ONUID: "12", OperState: "未知原因不在线", AuthType: "MAC", AuthInfo: "YHTC8A0B47DA",
+				LastOffTime: "--\r", CustomersAccount: "15378715071"},
 		},
 	}, nil)
-	if r.UserName != "15838372919" || r.UserBand != "300M_40M300M@101" || r.OrderStatus != "正常" {
-		t.Errorf("bad happy row: %+v", r)
+	if len(rows) != 3 {
+		t.Fatalf("got %d rows, want 3", len(rows))
 	}
-	if r.Notes != "" {
-		t.Errorf("expected empty notes on 200; got %q", r.Notes)
+	for _, r := range rows {
+		if r.QueryAccount != "15838372919" {
+			t.Errorf("QueryAccount = %q, want 15838372919", r.QueryAccount)
+		}
+		if strings.Contains(r.LastOffTime, "\r") {
+			t.Errorf("LastOffTime %q still has CR", r.LastOffTime)
+		}
 	}
-
-	// 500: account not found
-	r2 := buildQueryRowFromForward("bad", &query.ForwardResponse{
-		Code: 500, Msg: "根据宽带账号未找到所属地市信息！",
-	}, nil)
-	if r2.Notes != "根据宽带账号未找到所属地市信息！" || r2.UserName != "" {
-		t.Errorf("bad 500 row: %+v", r2)
-	}
-
-	// transport error
-	r3 := buildQueryRowFromForward("x", nil, errors.New("timeout"))
-	if r3.Notes != "timeout" {
-		t.Errorf("bad err row: %+v", r3)
+	if rows[1].AuthInfo != "CMDCA1F51676" || rows[1].CustomersAccount != "15838372919" {
+		t.Errorf("row 1 wrong: %+v", rows[1])
 	}
 
-	// unexpected code
-	r4 := buildQueryRowFromForward("x", &query.ForwardResponse{Code: 502, Msg: "gateway"}, nil)
-	if !strings.HasPrefix(r4.Notes, "code=502") {
-		t.Errorf("expected code prefix; got %q", r4.Notes)
+	// 500 → single note row.
+	r2 := buildQueryRowsFromForward("bad", &query.ForwardResponse{Code: 500, Msg: "未找到"}, nil)
+	if len(r2) != 1 || r2[0].Notes != "未找到" {
+		t.Errorf("500 branch: %+v", r2)
+	}
+
+	// Transport error → single error row.
+	r3 := buildQueryRowsFromForward("x", nil, errors.New("timeout"))
+	if len(r3) != 1 || r3[0].Notes != "timeout" {
+		t.Errorf("err branch: %+v", r3)
+	}
+
+	// 200 with empty data → single "no data" row (not zero rows).
+	r4 := buildQueryRowsFromForward("y", &query.ForwardResponse{Code: 200}, nil)
+	if len(r4) != 1 || r4[0].Notes != "无邻居数据" {
+		t.Errorf("empty data branch: %+v", r4)
 	}
 }
 
@@ -68,9 +75,10 @@ func TestParseAccounts(t *testing.T) {
 
 func TestExportSelectedCSV(t *testing.T) {
 	m := NewQueryTableModel()
-	m.Append(&QueryRow{Selected: true, Account: "a", OrderStatus: "正常", UserName: "u1"})
-	m.Append(&QueryRow{Selected: false, Account: "b"})
-	m.Append(&QueryRow{Selected: true, Account: "c", Notes: "err"})
+	m.Append(&QueryRow{Selected: true, QueryAccount: "q1", ONUID: "0",
+		OperState: "在线", AuthType: "MAC", AuthInfo: "AA:BB:CC"})
+	m.Append(&QueryRow{Selected: false, QueryAccount: "q2", ONUID: "1"})
+	m.Append(&QueryRow{Selected: true, QueryAccount: "q3", ONUID: "2", Notes: "err"})
 
 	path := filepath.Join(t.TempDir(), "out.csv")
 	n, err := m.ExportSelectedCSV(path)
@@ -88,12 +96,22 @@ func TestExportSelectedCSV(t *testing.T) {
 	if len(s) < 3 || s[0] != 0xEF || s[1] != 0xBB || s[2] != 0xBF {
 		t.Error("missing UTF-8 BOM")
 	}
-	for _, want := range []string{"账号", "状态", "用户名", "正常", "u1", "err"} {
+	for _, want := range []string{"查询账号", "ONU 序号", "在线", "AA:BB:CC", "err"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("CSV missing %q; got:\n%s", want, s)
 		}
 	}
-	if strings.Contains(s, ",b,") || strings.Contains(s, "\nb,") {
+	if strings.Contains(s, "q2") {
 		t.Errorf("unchecked row leaked into CSV:\n%s", s)
+	}
+}
+
+func TestAppendMany(t *testing.T) {
+	m := NewQueryTableModel()
+	m.AppendMany([]*QueryRow{{QueryAccount: "a"}, {QueryAccount: "b"}})
+	m.AppendMany(nil)
+	m.AppendMany([]*QueryRow{{QueryAccount: "c"}})
+	if m.RowCount() != 3 {
+		t.Errorf("RowCount = %d, want 3", m.RowCount())
 	}
 }

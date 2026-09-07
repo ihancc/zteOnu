@@ -5,54 +5,62 @@ package cmd
 import (
 	"encoding/csv"
 	"os"
+	"strings"
 
 	"github.com/lxn/walk"
 
 	"github.com/septrum101/zteOnu/app/query"
 )
 
-// QueryRow is one row of the 光猫查询 table. Fields mirror scene/security/forward
-// so the CSV export lines up 1:1 with what the operator sees.
+// QueryRow is one row of the 光猫查询 table - one ONU on the same PON port as
+// the queried broadband account. A single query typically produces many rows
+// (35+ on a fully-loaded PON), all sharing the same QueryAccount.
 type QueryRow struct {
-	Selected    bool
-	Account     string
-	OrderStatus string // 状态 (正常 / 暂停 / …)
-	UserName    string // 用户名 (通常手机号)
-	UserBand    string // 带宽 (如 300M_40M300M@101)
-	UserNode    string // 地市
-	BindInfo    string // OLT / POS / ONU 定位串
-	UpdateTime  string // 更新时间
-	Notes       string // 错误 / 未找到 说明
+	Selected         bool
+	QueryAccount     string // the account the user queried
+	ONUID            string
+	OperState        string
+	AuthType         string
+	AuthInfo         string // MAC address or password string
+	CustomersAccount string // this ONU's own customer account (often blank)
+	LastOffTime      string
+	Notes            string
 }
 
-// buildQueryRowFromForward flattens a scene/security/forward response into a
-// table row. code 200 populates the fields; 500 lands the message in Notes;
-// 401 is unusual to reach here (retry-after-refresh should have handled it).
-func buildQueryRowFromForward(account string, r *query.ForwardResponse, err error) *QueryRow {
-	row := &QueryRow{Account: account}
+// buildQueryRowsFromForward flattens one forward response into 0..N rows -
+// one per DeviceItem when code=200, or a single row carrying the error text
+// otherwise. LASTOFFTIME arrives with a trailing "\r" that we strip.
+func buildQueryRowsFromForward(account string, r *query.ForwardResponse, err error) []*QueryRow {
 	switch {
 	case err != nil:
-		row.Notes = err.Error()
+		return []*QueryRow{{QueryAccount: account, Notes: err.Error()}}
 	case r == nil:
-		row.Notes = "无响应"
-	case r.Code == 200 && r.Data != nil:
-		row.OrderStatus = r.Data.OrderStatus
-		row.UserName = r.Data.UserName
-		row.UserBand = r.Data.UserBand
-		row.UserNode = r.Data.UserNode
-		row.BindInfo = r.Data.BindInfo
-		row.UpdateTime = r.Data.UpdateTime
+		return []*QueryRow{{QueryAccount: account, Notes: "无响应"}}
+	case r.Code == 200:
+		if len(r.Data) == 0 {
+			return []*QueryRow{{QueryAccount: account, Notes: "无邻居数据"}}
+		}
+		rows := make([]*QueryRow, 0, len(r.Data))
+		for _, d := range r.Data {
+			rows = append(rows, &QueryRow{
+				QueryAccount:     account,
+				ONUID:            d.ONUID,
+				OperState:        d.OperState,
+				AuthType:         d.AuthType,
+				AuthInfo:         d.AuthInfo,
+				CustomersAccount: d.CustomersAccount,
+				LastOffTime:      strings.TrimSpace(strings.Trim(d.LastOffTime, "\r\n")),
+			})
+		}
+		return rows
 	case r.Code == 500:
-		row.Notes = r.Msg
+		return []*QueryRow{{QueryAccount: account, Notes: r.Msg}}
 	default:
-		row.Notes = "code=" + itoa(r.Code) + " " + r.Msg
+		return []*QueryRow{{QueryAccount: account, Notes: "code=" + itoa(r.Code) + " " + r.Msg}}
 	}
-	return row
 }
 
 func itoa(n int) string {
-	// tiny inline int→str; the whole file avoids strconv only to keep imports
-	// minimal for the model layer.
 	if n == 0 {
 		return "0"
 	}
@@ -91,19 +99,19 @@ func (m *QueryTableModel) Value(row, col int) any {
 	r := m.rows[row]
 	switch col {
 	case 0:
-		return r.Account
+		return r.QueryAccount
 	case 1:
-		return r.OrderStatus
+		return r.ONUID
 	case 2:
-		return r.UserName
+		return r.OperState
 	case 3:
-		return r.UserBand
+		return r.AuthType
 	case 4:
-		return r.UserNode
+		return r.AuthInfo
 	case 5:
-		return r.BindInfo
+		return r.CustomersAccount
 	case 6:
-		return r.UpdateTime
+		return r.LastOffTime
 	case 7:
 		return r.Notes
 	}
@@ -125,12 +133,21 @@ func (m *QueryTableModel) SetChecked(row int, checked bool) error {
 	return nil
 }
 
-// Rows exposes the underlying slice (read-only expected).
 func (m *QueryTableModel) Rows() []*QueryRow { return m.rows }
 
 func (m *QueryTableModel) Append(r *QueryRow) {
 	m.rows = append(m.rows, r)
 	m.PublishRowsInserted(len(m.rows)-1, len(m.rows)-1)
+}
+
+// AppendMany appends rows in one shot and publishes a single change event.
+func (m *QueryTableModel) AppendMany(rows []*QueryRow) {
+	if len(rows) == 0 {
+		return
+	}
+	start := len(m.rows)
+	m.rows = append(m.rows, rows...)
+	m.PublishRowsInserted(start, len(m.rows)-1)
 }
 
 func (m *QueryTableModel) Reset() {
@@ -163,7 +180,7 @@ func (m *QueryTableModel) ExportSelectedCSV(path string) (int, error) {
 	w := csv.NewWriter(f)
 	defer w.Flush()
 
-	header := []string{"账号", "状态", "用户名", "带宽", "地市", "绑定信息", "更新时间", "备注"}
+	header := []string{"查询账号", "ONU 序号", "状态", "认证类型", "认证信息", "客户号码", "最后离线时间", "备注"}
 	if err := w.Write(header); err != nil {
 		return 0, err
 	}
@@ -173,8 +190,8 @@ func (m *QueryTableModel) ExportSelectedCSV(path string) (int, error) {
 			continue
 		}
 		if err := w.Write([]string{
-			r.Account, r.OrderStatus, r.UserName, r.UserBand,
-			r.UserNode, r.BindInfo, r.UpdateTime, r.Notes,
+			r.QueryAccount, r.ONUID, r.OperState, r.AuthType,
+			r.AuthInfo, r.CustomersAccount, r.LastOffTime, r.Notes,
 		}); err != nil {
 			return n, err
 		}

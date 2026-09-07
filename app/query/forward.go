@@ -26,10 +26,10 @@ CcrU40WsiEf/8ksqZQIDAQAB
 
 const forwardURL = "http://211.138.20.196:31094/prod-api/scene/security/forward"
 
-// ForwardData is the successful-case payload of scene/security/forward. The
-// endpoint returns plaintext JSON (rsaDecrypt in 查限速批量.js is dead code -
-// see 施工App鉴权机制分析.html §8), so decoding is straight json.Unmarshal.
-type ForwardData struct {
+// BindInfoData is the successful-case payload of scene/security/forward when
+// called with compId=317: a single-account bindinfo/带宽/地市/订单状态 view.
+// This is the shape the reference project (查限速批量.js) targets.
+type BindInfoData struct {
 	BindInfo    string `json:"bindinfo"`
 	UserName    string `json:"userName"`
 	UserBand    string `json:"userBand"`
@@ -39,12 +39,32 @@ type ForwardData struct {
 	UpdateTime  string `json:"updateTime"`
 }
 
-// ForwardResponse envelopes ForwardData; code=200 is success, code=500 means
-// "account not found", code=401 means the JWT expired.
+// BindInfoResponse envelopes BindInfoData.
+type BindInfoResponse struct {
+	Code int           `json:"code"`
+	Msg  string        `json:"msg"`
+	Data *BindInfoData `json:"data"`
+}
+
+// DeviceItem is one ONU under the target account's PON port. The 施工 App /
+// scene/security/forward endpoint returns a list of these when compId=1310 -
+// i.e. all neighbors on the same PON as the queried broadband account.
+type DeviceItem struct {
+	ONUID            string `json:"ONUID"`
+	OperState        string `json:"OperState"`
+	AuthType         string `json:"AUTHTYPE"`
+	AuthInfo         string `json:"AUTHINFO"`
+	Password         string `json:"password"`
+	LastOffTime      string `json:"LASTOFFTIME"`
+	CustomersAccount string `json:"customersAccount"`
+}
+
+// ForwardResponse envelopes the DeviceItem list. code=200 success, code=500
+// means "account not found", code=401 the JWT expired.
 type ForwardResponse struct {
 	Code int          `json:"code"`
 	Msg  string       `json:"msg"`
-	Data *ForwardData `json:"data"`
+	Data []DeviceItem `json:"data"`
 }
 
 // ForwardClient wraps the /scene/security/forward endpoint and injects a JWT.
@@ -93,9 +113,69 @@ func (c *ForwardClient) rsaEncrypt(plain string) (string, error) {
 	return s, nil
 }
 
-// forwardRequest is the JSON body encrypted into the request. Defaults come
-// from 查限速批量.js: appFlag=T, compId=317, isApp=N.
+// forwardRequest is the JSON body encrypted into the request. Field set and
+// defaults match the ciphertext observed on the wire:
+//
+//	{account, appFlag:"T", compId:"1310", isApp:"N", ponName:"", sessionId:""}
+//
+// (查限速批量.js used compId=317 without ponName; the live 施工 App uses this
+// wider shape - the ponName filter selects devices under a specific PON when
+// non-empty.)
 type forwardRequest struct {
+	Account   string `json:"account"`
+	AppFlag   string `json:"appFlag"`
+	CompID    string `json:"compId"`
+	IsApp     string `json:"isApp"`
+	PonName   string `json:"ponName"`
+	SessionID string `json:"sessionId"`
+}
+
+// QueryOne looks up one broadband account with an empty PON filter (returns
+// all devices bound to the account). If the response is 401 and TokenProvider
+// is set, it refreshes the token once and retries.
+func (c *ForwardClient) QueryOne(account string) (*ForwardResponse, error) {
+	return c.QueryOneWithPon(account, "")
+}
+
+// QueryOneWithPon looks up one broadband account, restricted to a specific PON
+// name when ponName is non-empty. 401 → refresh + retry same as QueryOne.
+func (c *ForwardClient) QueryOneWithPon(account, ponName string) (*ForwardResponse, error) {
+	resp, err := c.doQuery(account, ponName)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Code != 401 || c.TokenProvider == nil {
+		return resp, nil
+	}
+	newTok, err := c.TokenProvider()
+	if err != nil {
+		return resp, fmt.Errorf("token 过期，刷新失败：%w", err)
+	}
+	c.Token = newTok
+	return c.doQuery(account, ponName)
+}
+
+// QueryBindInfo is the single-account bindinfo view (compId=317, no ponName).
+// On 401 it refreshes the token once, same as QueryOne.
+func (c *ForwardClient) QueryBindInfo(account string) (*BindInfoResponse, error) {
+	resp, err := c.doBindInfo(account)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Code != 401 || c.TokenProvider == nil {
+		return resp, nil
+	}
+	newTok, err := c.TokenProvider()
+	if err != nil {
+		return resp, fmt.Errorf("token 过期，刷新失败：%w", err)
+	}
+	c.Token = newTok
+	return c.doBindInfo(account)
+}
+
+// bindInfoRequest is the compId=317 flavor of the request body: matches the
+// shape 查限速批量.js sends (no ponName field).
+type bindInfoRequest struct {
 	Account   string `json:"account"`
 	AppFlag   string `json:"appFlag"`
 	CompID    string `json:"compId"`
@@ -103,29 +183,68 @@ type forwardRequest struct {
 	SessionID string `json:"sessionId"`
 }
 
-// QueryOne looks up one broadband account. If the response is 401 and
-// TokenProvider is set, it refreshes the token once and retries.
-func (c *ForwardClient) QueryOne(account string) (*ForwardResponse, error) {
-	resp, err := c.doQuery(account)
+func (c *ForwardClient) doBindInfo(account string) (*BindInfoResponse, error) {
+	body, err := json.Marshal(bindInfoRequest{
+		Account: account, AppFlag: "T", CompID: "317", IsApp: "N",
+	})
 	if err != nil {
 		return nil, err
 	}
-	if resp.Code != 401 || c.TokenProvider == nil {
-		return resp, nil
-	}
-	// Token expired: refresh once and retry.
-	newTok, err := c.TokenProvider()
+	raw, err := c.postForward(body)
 	if err != nil {
-		return resp, fmt.Errorf("token 过期，刷新失败：%w", err)
+		return nil, err
 	}
-	c.Token = newTok
-	return c.doQuery(account)
+	if raw == nil {
+		return &BindInfoResponse{Code: 401, Msg: "HTTP 401"}, nil
+	}
+	var r BindInfoResponse
+	if err := json.Unmarshal(raw, &r); err != nil {
+		return nil, fmt.Errorf("解析响应失败：%w（body：%s）", err, truncateStr(string(raw), 200))
+	}
+	return &r, nil
+}
+
+// postForward encrypts + POSTs the given JSON body and returns the raw
+// response bytes. A nil slice means HTTP 401 was seen (token expired).
+func (c *ForwardClient) postForward(body []byte) ([]byte, error) {
+	enc, err := c.rsaEncrypt(string(body))
+	if err != nil {
+		return nil, fmt.Errorf("RSA 加密请求失败：%w", err)
+	}
+	req, err := http.NewRequest("POST", forwardURL, strings.NewReader(enc))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	req.Header.Set("appVersion", "1.0.57")
+	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	req.Header.Set("User-Agent", "okhttp/4.9.3")
+	req.Header.Set("Accept-Encoding", "gzip")
+	req.Header.Set("Connection", "Keep-Alive")
+
+	client := c.HTTP
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, nil // caller treats nil-body as 401
+	}
+	if resp.StatusCode != http.StatusOK {
+		return raw, fmt.Errorf("HTTP %d：%s", resp.StatusCode, truncateStr(string(raw), 200))
+	}
+	return raw, nil
 }
 
 // doQuery is a single request without retry.
-func (c *ForwardClient) doQuery(account string) (*ForwardResponse, error) {
+func (c *ForwardClient) doQuery(account, ponName string) (*ForwardResponse, error) {
 	body, err := json.Marshal(forwardRequest{
-		Account: account, AppFlag: "T", CompID: "317", IsApp: "N",
+		Account: account, AppFlag: "T", CompID: "1310", IsApp: "N", PonName: ponName,
 	})
 	if err != nil {
 		return nil, err

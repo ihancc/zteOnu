@@ -3,18 +3,23 @@
 package query
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/septrum101/zteOnu/app/sso"
 )
 
-// TestLive_ForwardQuery hits the real 施工 App backend. Run with:
+// TestLive_ForwardQuery hits the real 施工 App backend and prints the RAW
+// JSON body so we can see every field the endpoint returns. Run with:
 //
 //	go test -tags=live ./app/query/ -run TestLive_ForwardQuery -v
-//
-// The user asked us to validate the flow end-to-end with tt_wangbang and
-// 15838372919, so this test is opt-in via the `live` build tag.
 func TestLive_ForwardQuery(t *testing.T) {
 	tok, err := sso.New().Login("tt_wangbang")
 	if err != nil {
@@ -26,15 +31,37 @@ func TestLive_ForwardQuery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := fc.QueryOne("15838372919")
+	// Build the same encrypted body but do the HTTP call inline so we can
+	// print the untouched response bytes (our decoded ForwardResponse would
+	// otherwise drop unknown fields).
+	reqBody, _ := json.Marshal(forwardRequest{
+		Account: "15838372919", AppFlag: "T", CompID: "1310", IsApp: "N",
+	})
+	ct, _ := rsa.EncryptPKCS1v15(rand.Reader, fc.pub, reqBody)
+	enc := base64.StdEncoding.EncodeToString(ct)
+	enc = strings.NewReplacer("+", "-", "/", "_").Replace(enc)
+	enc = strings.TrimRight(enc, "=")
+
+	req, _ := http.NewRequest("POST", forwardURL, strings.NewReader(enc))
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("appVersion", "1.0.57")
+	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	req.Header.Set("User-Agent", "okhttp/4.9.3")
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatalf("QueryOne: %v", err)
+		t.Fatal(err)
 	}
-	fmt.Printf("code=%d msg=%q\n", resp.Code, resp.Msg)
-	if resp.Data != nil {
-		fmt.Printf("  UserName=%q UserBand=%q UserNode=%q OrderStatus=%q\n",
-			resp.Data.UserName, resp.Data.UserBand, resp.Data.UserNode, resp.Data.OrderStatus)
-		fmt.Printf("  BindInfo=%q\n", resp.Data.BindInfo)
-		fmt.Printf("  Create=%q Update=%q\n", resp.Data.CreateTime, resp.Data.UpdateTime)
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	fmt.Println("== raw response ==")
+	fmt.Println(string(body))
+
+	// Pretty-print for readability.
+	var pretty any
+	if err := json.Unmarshal(body, &pretty); err == nil {
+		if b, err := json.MarshalIndent(pretty, "", "  "); err == nil {
+			fmt.Println("\n== pretty ==")
+			fmt.Println(string(b))
+		}
 	}
 }
