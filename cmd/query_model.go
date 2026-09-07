@@ -11,43 +11,48 @@ import (
 	"github.com/septrum101/zteOnu/app/query"
 )
 
-// QueryRow is one row of the 光猫查询 table.
+// QueryRow is one row of the 光猫查询 table. Fields mirror scene/security/forward
+// so the CSV export lines up 1:1 with what the operator sees.
 type QueryRow struct {
 	Selected    bool
 	Account     string
-	OnlineState string
-	OLT         string
-	POSPort     string
-	ONUEquip    string
-	Notes       string
+	OrderStatus string // 状态 (正常 / 暂停 / …)
+	UserName    string // 用户名 (通常手机号)
+	UserBand    string // 带宽 (如 300M_40M300M@101)
+	UserNode    string // 地市
+	BindInfo    string // OLT / POS / ONU 定位串
+	UpdateTime  string // 更新时间
+	Notes       string // 错误 / 未找到 说明
 }
 
-// buildQueryRowFromPon fills a row from the PON API response only. The batch
-// path in the UI does not call the password/ONU-detail endpoints (they are
-// not displayed in the table), keeping the round-trip lighter.
-func buildQueryRowFromPon(account string, pon *query.PonResponse, err error) *QueryRow {
+// buildQueryRowFromForward flattens a scene/security/forward response into a
+// table row. code 200 populates the fields; 500 lands the message in Notes;
+// 401 is unusual to reach here (retry-after-refresh should have handled it).
+func buildQueryRowFromForward(account string, r *query.ForwardResponse, err error) *QueryRow {
 	row := &QueryRow{Account: account}
 	switch {
 	case err != nil:
 		row.Notes = err.Error()
-	case pon == nil:
+	case r == nil:
 		row.Notes = "无响应"
-	case pon.Status != 0:
-		row.Notes = "status=" + itoa(pon.Status) + " " + pon.Message
-	case len(pon.Data) == 0:
-		row.Notes = "无数据"
+	case r.Code == 200 && r.Data != nil:
+		row.OrderStatus = r.Data.OrderStatus
+		row.UserName = r.Data.UserName
+		row.UserBand = r.Data.UserBand
+		row.UserNode = r.Data.UserNode
+		row.BindInfo = r.Data.BindInfo
+		row.UpdateTime = r.Data.UpdateTime
+	case r.Code == 500:
+		row.Notes = r.Msg
 	default:
-		it := pon.Data[0]
-		row.OnlineState = it.NewState
-		row.OLT = it.OltName
-		row.POSPort = it.PosPortName
-		row.ONUEquip = it.OnuEquipName
+		row.Notes = "code=" + itoa(r.Code) + " " + r.Msg
 	}
 	return row
 }
 
 func itoa(n int) string {
-	// tiny inline int→str to keep the file dependency-light
+	// tiny inline int→str; the whole file avoids strconv only to keep imports
+	// minimal for the model layer.
 	if n == 0 {
 		return "0"
 	}
@@ -80,29 +85,31 @@ func NewQueryTableModel() *QueryTableModel { return &QueryTableModel{} }
 
 func (m *QueryTableModel) RowCount() int { return len(m.rows) }
 
-// Value returns the cell text for column col, row row. Column indices match
-// the TableViewColumn declarations in gui.go.
+// Value returns the cell text for column col. Column indices match the
+// TableViewColumn declarations in gui.go.
 func (m *QueryTableModel) Value(row, col int) any {
 	r := m.rows[row]
 	switch col {
 	case 0:
 		return r.Account
 	case 1:
-		return r.OnlineState
+		return r.OrderStatus
 	case 2:
-		return r.OLT
+		return r.UserName
 	case 3:
-		return r.POSPort
+		return r.UserBand
 	case 4:
-		return r.ONUEquip
+		return r.UserNode
 	case 5:
+		return r.BindInfo
+	case 6:
+		return r.UpdateTime
+	case 7:
 		return r.Notes
 	}
 	return ""
 }
 
-// Checked / SetChecked implement walk.ItemChecker; combined with
-// CheckBoxes:true on the TableView they render as a leading checkbox column.
 func (m *QueryTableModel) Checked(row int) bool {
 	if row < 0 || row >= len(m.rows) {
 		return false
@@ -121,19 +128,16 @@ func (m *QueryTableModel) SetChecked(row int, checked bool) error {
 // Rows exposes the underlying slice (read-only expected).
 func (m *QueryTableModel) Rows() []*QueryRow { return m.rows }
 
-// Append adds a row and notifies the view.
 func (m *QueryTableModel) Append(r *QueryRow) {
 	m.rows = append(m.rows, r)
 	m.PublishRowsInserted(len(m.rows)-1, len(m.rows)-1)
 }
 
-// Reset drops all rows and notifies the view.
 func (m *QueryTableModel) Reset() {
 	m.rows = nil
 	m.PublishRowsReset()
 }
 
-// SelectAll toggles selection on all rows and notifies row updates.
 func (m *QueryTableModel) SelectAll(selected bool) {
 	for _, r := range m.rows {
 		r.Selected = selected
@@ -159,7 +163,7 @@ func (m *QueryTableModel) ExportSelectedCSV(path string) (int, error) {
 	w := csv.NewWriter(f)
 	defer w.Flush()
 
-	header := []string{"账号", "在线状态", "OLT", "POS 端口", "ONU 设备", "备注"}
+	header := []string{"账号", "状态", "用户名", "带宽", "地市", "绑定信息", "更新时间", "备注"}
 	if err := w.Write(header); err != nil {
 		return 0, err
 	}
@@ -169,7 +173,8 @@ func (m *QueryTableModel) ExportSelectedCSV(path string) (int, error) {
 			continue
 		}
 		if err := w.Write([]string{
-			r.Account, r.OnlineState, r.OLT, r.POSPort, r.ONUEquip, r.Notes,
+			r.Account, r.OrderStatus, r.UserName, r.UserBand,
+			r.UserNode, r.BindInfo, r.UpdateTime, r.Notes,
 		}); err != nil {
 			return n, err
 		}

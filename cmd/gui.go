@@ -19,6 +19,7 @@ import (
 	"github.com/septrum101/zteOnu/app/factory"
 	"github.com/septrum101/zteOnu/app/onu"
 	"github.com/septrum101/zteOnu/app/query"
+	"github.com/septrum101/zteOnu/app/sso"
 	tnet "github.com/septrum101/zteOnu/app/telnet"
 	"github.com/septrum101/zteOnu/version"
 )
@@ -68,7 +69,7 @@ type gui struct {
 	statusHint       *walk.Label
 
 	// 光猫查询 tab (independent of the ONU-side flows above)
-	queryTokenEdit                  *walk.LineEdit
+	queryLoginEdit                  *walk.LineEdit
 	queryAccountsEdit               *walk.TextEdit
 	queryRunBtn                     *walk.PushButton
 	querySelAllBtn, querySelNoneBtn *walk.PushButton
@@ -382,10 +383,10 @@ func runGUI() {
 									Composite{
 										Layout: Grid{Columns: 4},
 										Children: []Widget{
-											Label{Text: "combine-token"},
+											Label{Text: "工号"},
 											LineEdit{
-												AssignTo:   &g.queryTokenEdit,
-												CueBanner:  "粘贴施工端 APP 的 combine-token",
+												AssignTo:   &g.queryLoginEdit,
+												CueBanner:  "loginName，如 tt_wangbang（自动 SSO 换取 JWT，缓存并按需刷新）",
 												ColumnSpan: 3,
 											},
 											Label{Text: "并发线程"},
@@ -451,12 +452,14 @@ func runGUI() {
 								ColumnsOrderable: true,
 								Model:            g.queryModel,
 								Columns: []TableViewColumn{
-									{Title: "账号", Width: 130},
-									{Title: "在线状态", Width: 90},
-									{Title: "OLT", Width: 180},
-									{Title: "POS 端口", Width: 120},
-									{Title: "ONU 设备", Width: 180},
-									{Title: "备注", Width: 300},
+									{Title: "账号", Width: 120},
+									{Title: "状态", Width: 60},
+									{Title: "用户名", Width: 110},
+									{Title: "带宽", Width: 130},
+									{Title: "地市", Width: 60},
+									{Title: "绑定信息", Width: 260},
+									{Title: "更新时间", Width: 120},
+									{Title: "备注", Width: 220},
 								},
 							},
 						},
@@ -470,9 +473,9 @@ func runGUI() {
 	}
 
 	g.appendLog(fmt.Sprintf("%s\r\n就绪 - 设置参数后点击运行\r\n", version.Line()))
-	// Prime the CMCC-query token from disk so users don't re-paste each launch.
-	if saved := loadSavedToken(); saved != "" {
-		g.queryTokenEdit.SetText(saved)
+	// Prime the CMCC-query 工号 from disk so users don't re-type each launch.
+	if saved := loadSavedLoginName(); saved != "" {
+		g.queryLoginEdit.SetText(saved)
 	}
 	g.mw.Run()
 }
@@ -697,10 +700,9 @@ func (g *gui) onStatusRefresh() {
 	}()
 }
 
-// tokenFilePath returns %APPDATA%/zteonu/token.txt so the combine-token
-// persists across launches. Falls back to the exe directory when APPDATA is
-// unset (portable use).
-func tokenFilePath() string {
+// appDataPath returns %APPDATA%/zteonu/<name>. Falls back to the exe dir when
+// APPDATA is unset (portable use).
+func appDataPath(name string) string {
 	base := os.Getenv("APPDATA")
 	if base == "" {
 		if exe, err := os.Executable(); err == nil {
@@ -711,19 +713,25 @@ func tokenFilePath() string {
 	}
 	dir := filepath.Join(base, "zteonu")
 	_ = os.MkdirAll(dir, 0o755)
-	return filepath.Join(dir, "token.txt")
+	return filepath.Join(dir, name)
 }
 
-func loadSavedToken() string {
-	b, err := os.ReadFile(tokenFilePath())
+// loginNameFilePath / tokenCachePath localize the two artifacts we persist for
+// the 光猫查询 tab: the plain work-number (so users don't retype it) and the
+// cached JWT (so we skip the SSO round-trip while it's fresh).
+func loginNameFilePath() string { return appDataPath("loginname.txt") }
+func tokenCachePath() string    { return appDataPath("sso_token.json") }
+
+func loadSavedLoginName() string {
+	b, err := os.ReadFile(loginNameFilePath())
 	if err != nil {
 		return ""
 	}
 	return strings.TrimSpace(string(b))
 }
 
-func saveToken(tok string) {
-	_ = os.WriteFile(tokenFilePath(), []byte(strings.TrimSpace(tok)), 0o600)
+func saveLoginName(name string) {
+	_ = os.WriteFile(loginNameFilePath(), []byte(strings.TrimSpace(name)), 0o600)
 }
 
 // parseAccounts splits a multi-line text into a de-duplicated list of accounts.
@@ -743,23 +751,24 @@ func parseAccounts(text string) []string {
 	return out
 }
 
-// onQueryRun runs queryPonInfo concurrently for each account in the text box
-// and streams the results into the table as they arrive.
+// onQueryRun runs scene/security/forward concurrently for each account.
+// Auth path: 工号 → cached JWT (if fresh) or SSO exchange → RSA-encrypted POST.
+// Rows are streamed into the table as each account completes.
 func (g *gui) onQueryRun() {
 	if g.queryBusy {
 		return
 	}
-	token := strings.TrimSpace(g.queryTokenEdit.Text())
+	loginName := strings.TrimSpace(g.queryLoginEdit.Text())
 	accounts := parseAccounts(g.queryAccountsEdit.Text())
-	if token == "" {
-		walk.MsgBox(g.mw, "提示", "请先填写 combine-token", walk.MsgBoxIconWarning)
+	if loginName == "" {
+		walk.MsgBox(g.mw, "提示", "请先填写工号 (loginName)", walk.MsgBoxIconWarning)
 		return
 	}
 	if len(accounts) == 0 {
 		walk.MsgBox(g.mw, "提示", "账号列表为空", walk.MsgBoxIconWarning)
 		return
 	}
-	saveToken(token)
+	saveLoginName(loginName)
 
 	concurrency := atoiDefault(g.queryConcurrencyEdit.Text(), 4)
 	if concurrency > 20 {
@@ -770,11 +779,42 @@ func (g *gui) onQueryRun() {
 	g.queryRunBtn.SetEnabled(false)
 	g.queryRunBtn.SetText("查询中…")
 	g.queryModel.Reset()
-	g.queryHint.SetText(fmt.Sprintf("共 %d 个账号，并发 %d……", len(accounts), concurrency))
+	g.queryHint.SetText("正在换取 access_token……")
 
 	go func() {
-		client := query.New(token)
-		// Bounded-concurrency worker pool: each token from `sem` is one slot.
+		ssoCli := sso.New()
+		tok, err := sso.EnsureToken(loginName, tokenCachePath(), ssoCli)
+		if err != nil {
+			g.mw.Synchronize(func() {
+				g.queryBusy = false
+				g.queryRunBtn.SetEnabled(true)
+				g.queryRunBtn.SetText("批量查询")
+				g.queryHint.SetText("SSO 失败：" + err.Error())
+			})
+			return
+		}
+		g.mw.Synchronize(func() {
+			g.queryHint.SetText(fmt.Sprintf("token 已就绪，共 %d 个账号，并发 %d……", len(accounts), concurrency))
+		})
+
+		client, err := query.NewForwardClient(tok)
+		if err != nil {
+			g.mw.Synchronize(func() {
+				g.queryBusy = false
+				g.queryRunBtn.SetEnabled(true)
+				g.queryRunBtn.SetText("批量查询")
+				g.queryHint.SetText("初始化查询客户端失败：" + err.Error())
+			})
+			return
+		}
+		// On 401 the client asks TokenProvider for a fresh token; here we
+		// invalidate the disk cache first so we don't loop on a stale JWT.
+		client.TokenProvider = func() (string, error) {
+			sso.Invalidate(tokenCachePath())
+			return sso.EnsureToken(loginName, tokenCachePath(), ssoCli)
+		}
+
+		// Bounded-concurrency worker pool.
 		sem := make(chan struct{}, concurrency)
 		done := make(chan *QueryRow, len(accounts))
 		for _, acct := range accounts {
@@ -782,8 +822,8 @@ func (g *gui) onQueryRun() {
 			sem <- struct{}{}
 			go func() {
 				defer func() { <-sem }()
-				pon, _, err := client.QueryPonInfo(acct)
-				done <- buildQueryRowFromPon(acct, pon, err)
+				resp, qerr := client.QueryOne(acct)
+				done <- buildQueryRowFromForward(acct, resp, qerr)
 			}()
 		}
 		completed := 0
