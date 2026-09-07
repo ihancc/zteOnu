@@ -4,6 +4,8 @@ package cmd
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -16,6 +18,7 @@ import (
 
 	"github.com/septrum101/zteOnu/app/factory"
 	"github.com/septrum101/zteOnu/app/onu"
+	"github.com/septrum101/zteOnu/app/query"
 	tnet "github.com/septrum101/zteOnu/app/telnet"
 	"github.com/septrum101/zteOnu/version"
 )
@@ -64,6 +67,13 @@ type gui struct {
 	statusRefreshBtn *walk.PushButton
 	statusHint       *walk.Label
 
+	// 光猫查询 tab (independent of the ONU-side flows above)
+	queryTokenEdit, queryAccountEdit *walk.LineEdit
+	queryRunBtn                      *walk.PushButton
+	queryHint                        *walk.Label
+	queryResult                      *walk.TextEdit
+	queryBusy                        bool
+
 	ifaces []factory.InterfaceInfo
 
 	running bool
@@ -100,260 +110,320 @@ func runGUI() {
 		AssignTo: &g.mw,
 		Title:    "ZTE ONU 工具",
 		MinSize:  Size{Width: 860, Height: 540},
-		Size:     Size{Width: 960, Height: 620},
-		Layout:   HBox{},
+		Size:     Size{Width: 1000, Height: 660},
+		Layout:   VBox{},
 		Children: []Widget{
-			Composite{
-				MaxSize: Size{Width: 400},
-				Layout:  VBox{},
-				Children: []Widget{
-					GroupBox{
-						Title:  "连接设置",
-						Layout: Grid{Columns: 2},
+			TabWidget{
+				Pages: []TabPage{
+					{
+						Title:  "光猫配置",
+						Layout: HBox{},
 						Children: []Widget{
-							Label{Text: "IP 地址"},
-							LineEdit{AssignTo: &g.ipEdit, Text: "192.168.1.1"},
-							Label{Text: "HTTP 端口"},
-							LineEdit{AssignTo: &g.httpPortEdit, Text: "80"},
-							Label{Text: "telnet 端口"},
-							LineEdit{AssignTo: &g.telnetPortEdit, Text: "23"},
-							Label{Text: "工厂用户名"},
-							LineEdit{AssignTo: &g.userEdit, Text: "CMCCAdmin"},
-							Label{Text: "工厂密码"},
-							LineEdit{AssignTo: &g.passEdit, Text: "aDm8H%MdA"},
-						},
-					},
-					GroupBox{
-						Title:  "客户端 MAC",
-						Layout: Grid{Columns: 2},
-						Children: []Widget{
-							Label{Text: "来源"},
-							ComboBox{
-								AssignTo:              &g.macModeCB,
-								Editable:              false,
-								Model:                 []string{"自动检测", "指定网络接口", "自定义 MAC"},
-								CurrentIndex:          0,
-								OnCurrentIndexChanged: g.syncMacFields,
-							},
-							Label{Text: "网络接口"},
-							ComboBox{
-								AssignTo:     &g.ifaceCB,
-								Editable:     false,
-								Enabled:      false,
-								Model:        g.ifaceModel(),
-								CurrentIndex: 0,
-							},
-							Label{Text: "自定义 MAC"},
-							LineEdit{AssignTo: &g.macEdit, Enabled: false, CueBanner: "00:07:29:55:35:57"},
-						},
-					},
-					TabWidget{
-						Pages: []TabPage{
-							{
-								Title:  "手动",
-								Layout: VBox{},
+							Composite{
+								MaxSize: Size{Width: 400},
+								Layout:  VBox{},
 								Children: []Widget{
-									Composite{
+									GroupBox{
+										Title:  "连接设置",
 										Layout: Grid{Columns: 2},
 										Children: []Widget{
-											Label{Text: "模式"},
+											Label{Text: "IP 地址"},
+											LineEdit{AssignTo: &g.ipEdit, Text: "192.168.1.1"},
+											Label{Text: "HTTP 端口"},
+											LineEdit{AssignTo: &g.httpPortEdit, Text: "80"},
+											Label{Text: "telnet 端口"},
+											LineEdit{AssignTo: &g.telnetPortEdit, Text: "23"},
+											Label{Text: "工厂用户名"},
+											LineEdit{AssignTo: &g.userEdit, Text: "CMCCAdmin"},
+											Label{Text: "工厂密码"},
+											LineEdit{AssignTo: &g.passEdit, Text: "aDm8H%MdA"},
+										},
+									},
+									GroupBox{
+										Title:  "客户端 MAC",
+										Layout: Grid{Columns: 2},
+										Children: []Widget{
+											Label{Text: "来源"},
 											ComboBox{
-												AssignTo:     &g.actionCB,
+												AssignTo:              &g.macModeCB,
+												Editable:              false,
+												Model:                 []string{"自动检测", "指定网络接口", "自定义 MAC"},
+												CurrentIndex:          0,
+												OnCurrentIndexChanged: g.syncMacFields,
+											},
+											Label{Text: "网络接口"},
+											ComboBox{
+												AssignTo:     &g.ifaceCB,
 												Editable:     false,
-												Model:        []string{"仅打开临时 telnet", "永久 telnet（重启服务）", "永久 telnet（重启设备）"},
+												Enabled:      false,
+												Model:        g.ifaceModel(),
 												CurrentIndex: 0,
 											},
+											Label{Text: "自定义 MAC"},
+											LineEdit{AssignTo: &g.macEdit, Enabled: false, CueBanner: "00:07:29:55:35:57"},
 										},
 									},
-									PushButton{
-										AssignTo:  &g.runBtn,
-										Text:      "运行",
-										OnClicked: g.onRun,
-									},
-									Label{
-										AssignTo:  &g.credLabel,
-										Text:      "凭据将在此显示",
-										TextColor: walk.RGB(0x66, 0x66, 0x66),
-									},
-									VSpacer{},
-								},
-							},
-							{
-								Title:  "一键配置",
-								Layout: VBox{},
-								Children: []Widget{
-									GroupBox{
-										Title:  "设备参数",
-										Layout: Grid{Columns: 2},
-										Children: []Widget{
-											Label{Text: "SN"},
-											LineEdit{AssignTo: &g.snEdit, CueBanner: "ZTEGXXXXXXXX"},
-											Label{Text: "密码"},
-											LineEdit{AssignTo: &g.onePassEdit, CueBanner: "认证 / 注册密码"},
-											Label{Text: "类型"},
-											ComboBox{
-												AssignTo:     &g.ponCB,
-												Editable:     false,
-												Model:        []string{"GPON", "XGPON"},
-												CurrentIndex: 0,
-											},
-											Label{Text: "区域"},
-											ComboBox{
-												AssignTo:     &g.regionCB,
-												Editable:     false,
-												Model:        regionModel(),
-												CurrentIndex: onu.RegionIndexByID(onu.DefaultRegionID),
-											},
-										},
-									},
-									CheckBox{
-										AssignTo: &g.ensureWANCB,
-										Text:     "检查并创建 4034 TR069 / 4031 桥接连接（必要时新建）",
-										Checked:  true,
-									},
-									GroupBox{
-										Title:  "4031 桥接绑定端口",
-										Layout: HBox{},
-										Children: []Widget{
-											CheckBox{AssignTo: &g.lan1CB, Text: "LAN1", Checked: true},
-											CheckBox{AssignTo: &g.lan2CB, Text: "LAN2", Checked: true},
-											CheckBox{AssignTo: &g.lan3CB, Text: "LAN3", Checked: true},
-											CheckBox{AssignTo: &g.lan4CB, Text: "LAN4", Checked: true},
-										},
-									},
-									CheckBox{
-										AssignTo: &g.rebootAfterCB,
-										Text:     "创建 WAN 连接后再重启一次（使连接立即生效）",
-										Checked:  true,
-									},
-									CheckBox{
-										AssignTo: &g.ensureRxCB,
-										Text:     "RX 光功率超阈值时自动补偿（写 OPTICAL.RxOffset）",
-										Checked:  true,
-									},
-									Composite{
-										Layout: HBox{},
-										Children: []Widget{
-											Label{Text: "|RX| 阈值 (dB)"},
-											LineEdit{AssignTo: &g.rxMaxEdit, Text: "25"},
-											Label{Text: "目标 |RX| (dB)"},
-											LineEdit{AssignTo: &g.rxTargetEdit, Text: "23"},
-										},
-									},
-									PushButton{
-										AssignTo:  &g.oneBtn,
-										Text:      "一键配置",
-										OnClicked: g.onOneClick,
-									},
-									Label{
-										AssignTo:  &g.oneStatus,
-										Text:      "流程: 临时telnet → 集采→重启 → 写SN/密码 → 区域→重启（全程只用临时telnet）",
-										TextColor: walk.RGB(0x66, 0x66, 0x66),
-									},
-									VSpacer{},
-								},
-							},
-							{
-								Title:  "命令",
-								Layout: VBox{},
-								Children: []Widget{
-									GroupBox{
-										Title:  "telnet 控制台",
-										Layout: Grid{Columns: 2},
-										Children: []Widget{
-											Label{Text: "用户名"},
-											LineEdit{AssignTo: &g.cmdUserEdit, Text: "root"},
-											Label{Text: "密码"},
-											LineEdit{AssignTo: &g.cmdPassEdit, Text: "Zte521"},
-										},
-									},
-									Composite{
-										Layout: HBox{},
-										Children: []Widget{
-											PushButton{AssignTo: &g.cmdConnectBtn, Text: "连接", OnClicked: g.onCmdConnect},
-											PushButton{AssignTo: &g.cmdDisconnectBtn, Text: "断开", Enabled: false, OnClicked: g.onCmdDisconnect},
-										},
-									},
-									Label{
-										AssignTo:  &g.cmdStatus,
-										Text:      "未连接",
-										TextColor: walk.RGB(0x66, 0x66, 0x66),
-									},
-									Composite{
-										Layout: HBox{},
-										Children: []Widget{
-											LineEdit{
-												AssignTo:  &g.cmdEdit,
-												CueBanner: "输入命令，回车或点“执行”，如 sendcmd 1 DB show",
-												OnKeyDown: func(key walk.Key) {
-													if key == walk.KeyReturn {
-														g.onCmdSend()
-													}
+									TabWidget{
+										Pages: []TabPage{
+											{
+												Title:  "手动",
+												Layout: VBox{},
+												Children: []Widget{
+													Composite{
+														Layout: Grid{Columns: 2},
+														Children: []Widget{
+															Label{Text: "模式"},
+															ComboBox{
+																AssignTo:     &g.actionCB,
+																Editable:     false,
+																Model:        []string{"仅打开临时 telnet", "永久 telnet（重启服务）", "永久 telnet（重启设备）"},
+																CurrentIndex: 0,
+															},
+														},
+													},
+													PushButton{
+														AssignTo:  &g.runBtn,
+														Text:      "运行",
+														OnClicked: g.onRun,
+													},
+													Label{
+														AssignTo:  &g.credLabel,
+														Text:      "凭据将在此显示",
+														TextColor: walk.RGB(0x66, 0x66, 0x66),
+													},
+													VSpacer{},
 												},
 											},
-											PushButton{AssignTo: &g.cmdSendBtn, Text: "执行", OnClicked: g.onCmdSend},
+											{
+												Title:  "一键配置",
+												Layout: VBox{},
+												Children: []Widget{
+													GroupBox{
+														Title:  "设备参数",
+														Layout: Grid{Columns: 2},
+														Children: []Widget{
+															Label{Text: "SN"},
+															LineEdit{AssignTo: &g.snEdit, CueBanner: "ZTEGXXXXXXXX"},
+															Label{Text: "密码"},
+															LineEdit{AssignTo: &g.onePassEdit, CueBanner: "认证 / 注册密码"},
+															Label{Text: "类型"},
+															ComboBox{
+																AssignTo:     &g.ponCB,
+																Editable:     false,
+																Model:        []string{"GPON", "XGPON"},
+																CurrentIndex: 0,
+															},
+															Label{Text: "区域"},
+															ComboBox{
+																AssignTo:     &g.regionCB,
+																Editable:     false,
+																Model:        regionModel(),
+																CurrentIndex: onu.RegionIndexByID(onu.DefaultRegionID),
+															},
+														},
+													},
+													CheckBox{
+														AssignTo: &g.ensureWANCB,
+														Text:     "检查并创建 4034 TR069 / 4031 桥接连接（必要时新建）",
+														Checked:  true,
+													},
+													GroupBox{
+														Title:  "4031 桥接绑定端口",
+														Layout: HBox{},
+														Children: []Widget{
+															CheckBox{AssignTo: &g.lan1CB, Text: "LAN1", Checked: true},
+															CheckBox{AssignTo: &g.lan2CB, Text: "LAN2", Checked: true},
+															CheckBox{AssignTo: &g.lan3CB, Text: "LAN3", Checked: true},
+															CheckBox{AssignTo: &g.lan4CB, Text: "LAN4", Checked: true},
+														},
+													},
+													CheckBox{
+														AssignTo: &g.rebootAfterCB,
+														Text:     "创建 WAN 连接后再重启一次（使连接立即生效）",
+														Checked:  true,
+													},
+													CheckBox{
+														AssignTo: &g.ensureRxCB,
+														Text:     "RX 光功率超阈值时自动补偿（写 OPTICAL.RxOffset）",
+														Checked:  true,
+													},
+													Composite{
+														Layout: HBox{},
+														Children: []Widget{
+															Label{Text: "|RX| 阈值 (dB)"},
+															LineEdit{AssignTo: &g.rxMaxEdit, Text: "25"},
+															Label{Text: "目标 |RX| (dB)"},
+															LineEdit{AssignTo: &g.rxTargetEdit, Text: "23"},
+														},
+													},
+													PushButton{
+														AssignTo:  &g.oneBtn,
+														Text:      "一键配置",
+														OnClicked: g.onOneClick,
+													},
+													Label{
+														AssignTo:  &g.oneStatus,
+														Text:      "流程: 临时telnet → 集采→重启 → 写SN/密码 → 区域→重启（全程只用临时telnet）",
+														TextColor: walk.RGB(0x66, 0x66, 0x66),
+													},
+													VSpacer{},
+												},
+											},
+											{
+												Title:  "命令",
+												Layout: VBox{},
+												Children: []Widget{
+													GroupBox{
+														Title:  "telnet 控制台",
+														Layout: Grid{Columns: 2},
+														Children: []Widget{
+															Label{Text: "用户名"},
+															LineEdit{AssignTo: &g.cmdUserEdit, Text: "root"},
+															Label{Text: "密码"},
+															LineEdit{AssignTo: &g.cmdPassEdit, Text: "Zte521"},
+														},
+													},
+													Composite{
+														Layout: HBox{},
+														Children: []Widget{
+															PushButton{AssignTo: &g.cmdConnectBtn, Text: "连接", OnClicked: g.onCmdConnect},
+															PushButton{AssignTo: &g.cmdDisconnectBtn, Text: "断开", Enabled: false, OnClicked: g.onCmdDisconnect},
+														},
+													},
+													Label{
+														AssignTo:  &g.cmdStatus,
+														Text:      "未连接",
+														TextColor: walk.RGB(0x66, 0x66, 0x66),
+													},
+													Composite{
+														Layout: HBox{},
+														Children: []Widget{
+															LineEdit{
+																AssignTo:  &g.cmdEdit,
+																CueBanner: "输入命令，回车或点“执行”，如 sendcmd 1 DB show",
+																OnKeyDown: func(key walk.Key) {
+																	if key == walk.KeyReturn {
+																		g.onCmdSend()
+																	}
+																},
+															},
+															PushButton{AssignTo: &g.cmdSendBtn, Text: "执行", OnClicked: g.onCmdSend},
+														},
+													},
+													Label{
+														Text:      "用永久 telnet（默认 root/Zte521）连接；命令与输出显示在右侧日志。",
+														TextColor: walk.RGB(0x66, 0x66, 0x66),
+													},
+													VSpacer{},
+												},
+											},
+											{
+												Title:  "状态",
+												Layout: VBox{},
+												Children: []Widget{
+													PushButton{
+														AssignTo:  &g.statusRefreshBtn,
+														Text:      "刷新状态",
+														OnClicked: g.onStatusRefresh,
+													},
+													Label{
+														AssignTo:  &g.statusHint,
+														Text:      "点“刷新状态”读取一次；使用永久 telnet（root/Zte521）",
+														TextColor: walk.RGB(0x66, 0x66, 0x66),
+													},
+													TextEdit{
+														AssignTo:      &g.statusText,
+														ReadOnly:      true,
+														VScroll:       true,
+														HScroll:       true,
+														Font:          Font{Family: "NSimSun", PointSize: 10},
+														CompactHeight: false,
+														Text:          "等待读取…",
+													},
+												},
+											},
 										},
-									},
-									Label{
-										Text:      "用永久 telnet（默认 root/Zte521）连接；命令与输出显示在右侧日志。",
-										TextColor: walk.RGB(0x66, 0x66, 0x66),
 									},
 									VSpacer{},
 								},
 							},
-							{
-								Title:  "状态",
+							Composite{
 								Layout: VBox{},
 								Children: []Widget{
-									PushButton{
-										AssignTo:  &g.statusRefreshBtn,
-										Text:      "刷新状态",
-										OnClicked: g.onStatusRefresh,
-									},
-									Label{
-										AssignTo:  &g.statusHint,
-										Text:      "点“刷新状态”读取一次；使用永久 telnet（root/Zte521）",
-										TextColor: walk.RGB(0x66, 0x66, 0x66),
-									},
+									Label{Text: "日志输出"},
 									TextEdit{
-										AssignTo:      &g.statusText,
-										ReadOnly:      true,
-										VScroll:       true,
-										HScroll:       true,
-										Font:          Font{Family: "NSimSun", PointSize: 10},
-										CompactHeight: false,
-										Text:          "等待读取…",
+										AssignTo: &g.logView,
+										ReadOnly: true,
+										VScroll:  true,
+										// Consolas has no CJK glyphs (Chinese shows as tofu), so use
+										// NSimSun: a monospaced font that ships with Windows and
+										// renders both ASCII and Chinese. A missing face falls back
+										// to the default CJK-capable face rather than to tofu.
+										Font: Font{Family: "NSimSun", PointSize: 10},
 									},
 								},
 							},
+						}, // end 光猫配置 page.Children
+					},
+					{
+						Title:  "光猫查询",
+						Layout: VBox{},
+						Children: []Widget{
+							GroupBox{
+								Title:  "查询设置",
+								Layout: Grid{Columns: 2},
+								Children: []Widget{
+									Label{Text: "combine-token"},
+									LineEdit{
+										AssignTo:  &g.queryTokenEdit,
+										CueBanner: "粘贴施工端 APP 的 combine-token",
+									},
+									Label{Text: "账号 / 号码"},
+									LineEdit{
+										AssignTo:  &g.queryAccountEdit,
+										CueBanner: "例如 13800001111",
+									},
+								},
+							},
+							Composite{
+								Layout: HBox{},
+								Children: []Widget{
+									PushButton{
+										AssignTo:  &g.queryRunBtn,
+										Text:      "查询",
+										OnClicked: g.onQueryRun,
+									},
+									Label{
+										AssignTo:  &g.queryHint,
+										Text:      "查询 PON 信息 + ONU 详情 + CMCCAdmin 密码；token 自动保存到 %APPDATA%/zteonu/token.txt",
+										TextColor: walk.RGB(0x66, 0x66, 0x66),
+									},
+								},
+							},
+							Label{Text: "查询结果"},
+							TextEdit{
+								AssignTo: &g.queryResult,
+								ReadOnly: true,
+								VScroll:  true,
+								HScroll:  true,
+								Font:     Font{Family: "NSimSun", PointSize: 10},
+								Text:     "填写 token 和账号后点“查询”。",
+							},
 						},
 					},
-					VSpacer{},
-				},
-			},
-			Composite{
-				Layout: VBox{},
-				Children: []Widget{
-					Label{Text: "日志输出"},
-					TextEdit{
-						AssignTo: &g.logView,
-						ReadOnly: true,
-						VScroll:  true,
-						// Consolas has no CJK glyphs (Chinese shows as tofu), so use
-						// NSimSun: a monospaced font that ships with Windows and
-						// renders both ASCII and Chinese. A missing face falls back
-						// to the default CJK-capable face rather than to tofu.
-						Font: Font{Family: "NSimSun", PointSize: 10},
-					},
-				},
-			},
-		},
+				}, // end TabWidget.Pages
+			}, // end outer TabWidget
+		}, // end MainWindow.Children (outer VBox)
 	}).Create(); err != nil {
 		walk.MsgBox(nil, "错误", "无法创建窗口: "+err.Error(), walk.MsgBoxIconError)
 		return
 	}
 
 	g.appendLog(fmt.Sprintf("%s\r\n就绪 - 设置参数后点击运行\r\n", version.Line()))
+	// Prime the CMCC-query token from disk so users don't re-paste each launch.
+	if saved := loadSavedToken(); saved != "" {
+		g.queryTokenEdit.SetText(saved)
+	}
 	g.mw.Run()
 }
 
@@ -573,6 +643,73 @@ func (g *gui) onStatusRefresh() {
 			}
 			g.statusHint.SetText("已读取")
 			g.statusText.SetText(normalizeNewlines(out))
+		})
+	}()
+}
+
+// tokenFilePath returns %APPDATA%/zteonu/token.txt so the combine-token
+// persists across launches. Falls back to the exe directory when APPDATA is
+// unset (portable use).
+func tokenFilePath() string {
+	base := os.Getenv("APPDATA")
+	if base == "" {
+		if exe, err := os.Executable(); err == nil {
+			base = filepath.Dir(exe)
+		} else {
+			base = "."
+		}
+	}
+	dir := filepath.Join(base, "zteonu")
+	_ = os.MkdirAll(dir, 0o755)
+	return filepath.Join(dir, "token.txt")
+}
+
+func loadSavedToken() string {
+	b, err := os.ReadFile(tokenFilePath())
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+func saveToken(tok string) {
+	_ = os.WriteFile(tokenFilePath(), []byte(strings.TrimSpace(tok)), 0o600)
+}
+
+// onQueryRun looks up an account through the CMCC 施工端 APIs. Independent of
+// the ONU-side one-click / status flows: it can run concurrently.
+func (g *gui) onQueryRun() {
+	if g.queryBusy {
+		return
+	}
+	token := strings.TrimSpace(g.queryTokenEdit.Text())
+	account := strings.TrimSpace(g.queryAccountEdit.Text())
+	if token == "" {
+		walk.MsgBox(g.mw, "提示", "请先填写 combine-token", walk.MsgBoxIconWarning)
+		return
+	}
+	if account == "" {
+		walk.MsgBox(g.mw, "提示", "请填写账号 / 号码", walk.MsgBoxIconWarning)
+		return
+	}
+	saveToken(token)
+
+	g.queryBusy = true
+	g.queryRunBtn.SetEnabled(false)
+	g.queryRunBtn.SetText("查询中…")
+	g.queryHint.SetText("请求中，请稍候……")
+	g.queryResult.SetText("")
+
+	go func() {
+		client := query.New(token)
+		res := client.LookupAll(account)
+		text := query.FormatResult(res)
+		g.mw.Synchronize(func() {
+			g.queryBusy = false
+			g.queryRunBtn.SetEnabled(true)
+			g.queryRunBtn.SetText("查询")
+			g.queryHint.SetText("完成")
+			g.queryResult.SetText(normalizeNewlines(text))
 		})
 	}()
 }
