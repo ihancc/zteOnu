@@ -43,11 +43,12 @@ type gui struct {
 	runBtn                                   *walk.PushButton
 
 	// one-click provisioning
-	snEdit, onePassEdit *walk.LineEdit
-	ponCB, regionCB     *walk.ComboBox
-	reopenCB            *walk.CheckBox
-	oneBtn              *walk.PushButton
-	oneStatus           *walk.Label
+	snEdit, onePassEdit                  *walk.LineEdit
+	ponCB, regionCB                      *walk.ComboBox
+	reopenCB, ensureWANCB, rebootAfterCB *walk.CheckBox
+	lan1CB, lan2CB, lan3CB, lan4CB       *walk.CheckBox
+	oneBtn                               *walk.PushButton
+	oneStatus                            *walk.Label
 
 	// telnet command console
 	cmdUserEdit, cmdPassEdit, cmdEdit           *walk.LineEdit
@@ -202,6 +203,26 @@ func runGUI() {
 										AssignTo: &g.reopenCB,
 										Text:     "完成后再获取一次临时 telnet 验证（多等一次重启）",
 										Checked:  false,
+									},
+									CheckBox{
+										AssignTo: &g.ensureWANCB,
+										Text:     "检查并创建 4034 TR069 / 4031 桥接连接（必要时新建）",
+										Checked:  true,
+									},
+									GroupBox{
+										Title:  "4031 桥接绑定端口",
+										Layout: HBox{},
+										Children: []Widget{
+											CheckBox{AssignTo: &g.lan1CB, Text: "LAN1", Checked: true},
+											CheckBox{AssignTo: &g.lan2CB, Text: "LAN2", Checked: true},
+											CheckBox{AssignTo: &g.lan3CB, Text: "LAN3", Checked: true},
+											CheckBox{AssignTo: &g.lan4CB, Text: "LAN4", Checked: true},
+										},
+									},
+									CheckBox{
+										AssignTo: &g.rebootAfterCB,
+										Text:     "创建 WAN 连接后再重启一次（使连接立即生效）",
+										Checked:  true,
 									},
 									PushButton{
 										AssignTo:  &g.oneBtn,
@@ -496,13 +517,27 @@ func (g *gui) onOneClick() {
 		}
 	}
 
+	// Compute PortMask from LAN checkboxes: bit0=LAN1..bit3=LAN4.
+	mask := 0
+	for i, cb := range []*walk.CheckBox{g.lan1CB, g.lan2CB, g.lan3CB, g.lan4CB} {
+		if cb.Checked() {
+			mask |= 1 << i
+		}
+	}
+	if mask == 0 {
+		mask = 15 // fallback: bind all if user unchecked everything
+	}
+
 	o := onu.OneClickOptions{
-		Options:      g.collectOptions(),
-		SN:           sn,
-		Password:     pass,
-		PON:          onu.PONType(g.ponCB.CurrentIndex()),
-		RegionID:     onu.Regions[g.regionCB.CurrentIndex()].ID,
-		ReopenTelnet: g.reopenCB.Checked(),
+		Options:           g.collectOptions(),
+		SN:                sn,
+		Password:          pass,
+		PON:               onu.PONType(g.ponCB.CurrentIndex()),
+		RegionID:          onu.Regions[g.regionCB.CurrentIndex()].ID,
+		ReopenTelnet:      g.reopenCB.Checked(),
+		EnsureWAN:         g.ensureWANCB.Checked(),
+		BridgePortMask:    mask,
+		RebootAfterEnsure: g.rebootAfterCB.Checked(),
 	}
 
 	g.setRunning(true)

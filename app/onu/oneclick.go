@@ -45,11 +45,14 @@ const (
 // a temporary telnet after the final reboot to confirm the device recovered.
 type OneClickOptions struct {
 	Options
-	SN           string
-	Password     string
-	PON          PONType
-	RegionID     int
-	ReopenTelnet bool
+	SN                string
+	Password          string
+	PON               PONType
+	RegionID          int
+	ReopenTelnet      bool
+	EnsureWAN         bool // check/create 4034 TR069 + 4031 bridge after region reboot
+	BridgePortMask    int  // LAN-port bitmap for the 4031 bridge (bit0=LAN1..bit3=LAN4, 15 = all)
+	RebootAfterEnsure bool // reboot once more after creating WAN entries to apply
 }
 
 // RunOneClick provisions the ONU end to end using TEMPORARY telnet only:
@@ -105,18 +108,34 @@ func RunOneClick(o OneClickOptions) error {
 	applySdefconfThenReboot(t, o.RegionID, log)
 	t = nil // applySdefconfThenReboot closed the connection
 
-	if o.ReopenTelnet {
-		logf(log, "等待设备重启完成并再次获取临时 telnet 验证……")
-		nt, rerr := reconnectTempAfterReboot(o.Options, log)
-		if rerr != nil {
-			return fmt.Errorf("重启后重新获取临时 telnet 失败：%w", rerr)
-		}
-		nt.Conn.Close()
-		logf(log, "完成：设备已按新配置重启，临时 telnet 验证通过")
+	// Optional post-region steps: verify telnet, ensure WAN connections.
+	needFinalConnect := o.ReopenTelnet || o.EnsureWAN
+	if !needFinalConnect {
+		logf(log, "完成：设备正在以新配置重启")
 		return nil
 	}
 
-	logf(log, "完成：设备正在以新配置重启")
+	logf(log, "等待设备重启完成，重新获取临时 telnet……")
+	nt, rerr := reconnectTempAfterReboot(o.Options, log)
+	if rerr != nil {
+		return fmt.Errorf("重启后重新获取临时 telnet 失败：%w", rerr)
+	}
+	defer nt.Conn.Close()
+
+	if o.EnsureWAN {
+		logf(log, "== 步骤 5：检查并创建 WAN 连接（4034 TR069 / 4031 桥接）==")
+		if err := EnsureWANConnections(nt, o.BridgePortMask, log); err != nil {
+			return err
+		}
+		if o.RebootAfterEnsure {
+			logf(log, "正在重启设备以使新 WAN 连接生效……")
+			_ = nt.Reboot()
+			logf(log, "完成：设备正在重启，新 WAN 连接将随之生效")
+			return nil
+		}
+	}
+
+	logf(log, "完成：设备已按新配置重启，临时 telnet 验证通过")
 	return nil
 }
 
