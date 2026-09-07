@@ -136,16 +136,6 @@ func TestSelectByPredicate_OfflineOnly(t *testing.T) {
 	}
 }
 
-func TestFormatLogTime(t *testing.T) {
-	if got := formatLogTime("20260902173746"); got != "2026-09-02 17:37:46" {
-		t.Errorf("formatLogTime = %q, want 2026-09-02 17:37:46", got)
-	}
-	// Unexpected length passes through unchanged.
-	if got := formatLogTime("---"); got != "---" {
-		t.Errorf("passthrough failed: %q", got)
-	}
-}
-
 func TestFilter_ShowOnlyOffline(t *testing.T) {
 	m := NewQueryTableModel()
 	m.AppendMany([]*QueryRow{

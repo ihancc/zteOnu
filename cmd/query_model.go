@@ -28,14 +28,17 @@ type QueryRow struct {
 	AuthInfo         string // MAC address or password string
 	CustomersAccount string // this ONU's own customer account (often blank)
 	LastOffTime      string
-	// filled by QueryDetail (compId=1230):
-	Password       string // detail.onuPasswd
-	AccountStatus  string // detail.orderStatus (正常 / 暂停 / …)
-	ONURunState    string // detail.OperState (fresh)
-	PonPortName    string // detail.oltPort
-	SplitterName   string // detail.spos (分光器)
-	LastAuthTime   string // detail.logTime (formatted "yyyy-MM-dd HH:mm:ss")
-	LastAuthResult string // detail.bmsOperateType
+	// filled by the initial compId=1310 query (see buildQueryRowsFromForward):
+	Password string // 密码 (DeviceItem.password from 1310 - same as AuthInfo)
+	// filled by "获取详情" via the new queryOnuInfo endpoint (:31071 + face-login):
+	AccountStatus  string // 账号状态 (radiusState)
+	ONURunState    string // ONU 运行状态 (emsOperState, fresh from EMS)
+	PonPortName    string // PON 口名称 (oltPortName)
+	SplitterName   string // 分光器名称 (posPortName)
+	LastOnlineTime string // 最后上线时间 (emsLastUpTime)
+	LastDownCause  string // 最后离线原因 (emsLastDownCause)
+	// LastOffTime (最后离线时间) is a column that starts from 1310's LASTOFFTIME
+	// and gets overwritten by queryOnuInfo emsLastDownTime when 获取详情 runs.
 }
 
 // buildQueryRowsFromForward flattens one forward response into 0..N rows -
@@ -55,11 +58,16 @@ func buildQueryRowsFromForward(account string, r *query.ForwardResponse, err err
 		rows := make([]*QueryRow, 0, len(r.Data))
 		for _, d := range r.Data {
 			rows = append(rows, &QueryRow{
-				QueryAccount:     account,
-				ONUID:            d.ONUID,
-				OperState:        d.OperState,
-				AuthType:         d.AuthType,
-				AuthInfo:         d.AuthInfo,
+				QueryAccount: account,
+				ONUID:        d.ONUID,
+				OperState:    d.OperState,
+				AuthType:     d.AuthType,
+				AuthInfo:     d.AuthInfo,
+				// Password comes from the same 1310 record as AuthInfo (MAC
+				// vs PASSWORD authed ONUs both put the credential here), so
+				// the 密码 column is already populated after the first query
+				// - no separate fetch needed.
+				Password:         d.Password,
 				CustomersAccount: d.CustomersAccount,
 				LastOffTime:      strings.TrimSpace(strings.Trim(d.LastOffTime, "\r\n")),
 			})
@@ -72,16 +80,40 @@ func buildQueryRowsFromForward(account string, r *query.ForwardResponse, err err
 	}
 }
 
-// ApplyDetail copies the compId=1230 detail response into row's detail fields.
-// Called after the "获取详情" step for each checked row.
-func ApplyDetail(row *QueryRow, d *query.DetailData) {
-	row.Password = d.OnuPasswd
-	row.AccountStatus = d.OrderStatus
-	row.ONURunState = d.OperState
-	row.PonPortName = d.OltPort
-	row.SplitterName = d.Spos
-	row.LastAuthTime = formatLogTime(d.LogTime)
-	row.LastAuthResult = d.BmsOperateType
+// ApplyOnuInfo copies fields from queryOnuInfo (compId-independent, port
+// :31071, combine-token auth) into a row. Called after the "获取详情" step
+// for each checked row.
+func ApplyOnuInfo(row *QueryRow, d *query.OnuInfoData) {
+	if d == nil {
+		return
+	}
+	if wc := d.WorkingConditions; wc != nil {
+		if wc.EmsOperState != "" {
+			row.ONURunState = wc.EmsOperState
+		}
+		if wc.EmsLastUpTime != "" {
+			row.LastOnlineTime = wc.EmsLastUpTime
+		}
+		if wc.EmsLastDownTime != "" {
+			row.LastOffTime = wc.EmsLastDownTime // overwrite 1310's LASTOFFTIME
+		}
+		if wc.EmsLastDownCause != "" {
+			row.LastDownCause = wc.EmsLastDownCause
+		}
+	}
+	if zg := d.ZgData; zg != nil {
+		if zg.OltPortName != "" {
+			row.PonPortName = zg.OltPortName
+		}
+		if zg.PosPortName != "" {
+			row.SplitterName = zg.PosPortName
+		}
+	}
+	if co := d.ComplaintAndOttInfo; co != nil {
+		if co.RadiusState != "" {
+			row.AccountStatus = co.RadiusState
+		}
+	}
 }
 
 func itoa(n int) string {
@@ -132,15 +164,6 @@ type QueryTableModel struct {
 	allRows         []*QueryRow
 	rows            []*QueryRow
 	showOnlyOffline bool
-}
-
-// formatLogTime turns "20260902173746" into "2026-09-02 17:37:46" for display.
-// Any unexpected length passes through unchanged.
-func formatLogTime(s string) string {
-	if len(s) != 14 {
-		return s
-	}
-	return s[0:4] + "-" + s[4:6] + "-" + s[6:8] + " " + s[8:10] + ":" + s[10:12] + ":" + s[12:14]
 }
 
 // visible reports whether a row passes the current filter.
@@ -213,9 +236,9 @@ func (m *QueryTableModel) Value(row, col int) any {
 	case 11:
 		return r.SplitterName
 	case 12:
-		return r.LastAuthTime
+		return r.LastOnlineTime
 	case 13:
-		return r.LastAuthResult
+		return r.LastDownCause
 	}
 	return ""
 }
@@ -348,9 +371,9 @@ func (m *QueryTableModel) lessAt(a, b *QueryRow, col int) bool {
 	case 11:
 		return a.SplitterName < b.SplitterName
 	case 12:
-		return a.LastAuthTime < b.LastAuthTime
+		return a.LastOnlineTime < b.LastOnlineTime
 	case 13:
-		return a.LastAuthResult < b.LastAuthResult
+		return a.LastDownCause < b.LastDownCause
 	}
 	return false
 }
@@ -386,7 +409,7 @@ func (m *QueryTableModel) ExportSelectedCSV(path string) (int, error) {
 	header := []string{
 		"查询账号", "ONU 序号", "状态", "认证类型", "认证信息",
 		"客户号码", "最后离线时间", "密码", "账号状态", "ONU 运行状态",
-		"PON 口名称", "分光器名称", "最后认证时间", "最后认证结果",
+		"PON 口名称", "分光器名称", "最后上线时间", "最后离线原因",
 	}
 	if err := w.Write(header); err != nil {
 		return 0, err
@@ -400,8 +423,8 @@ func (m *QueryTableModel) ExportSelectedCSV(path string) (int, error) {
 		if err := w.Write([]string{
 			r.QueryAccount, r.ONUID, r.OperState, r.AuthType, r.AuthInfo,
 			r.CustomersAccount, r.LastOffTime, r.Password, r.AccountStatus,
-			r.ONURunState, r.PonPortName, r.SplitterName, r.LastAuthTime,
-			r.LastAuthResult,
+			r.ONURunState, r.PonPortName, r.SplitterName, r.LastOnlineTime,
+			r.LastDownCause,
 		}); err != nil {
 			return n, err
 		}

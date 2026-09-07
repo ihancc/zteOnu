@@ -103,18 +103,18 @@ func (g *gui) onBindInfoRun() {
 	}()
 }
 
-// onQueryFetchDetails walks the checked rows and calls scene/security/forward
-// with compId=1230 for each customer account, filling in Password /
-// AccountStatus / ONURunState / PonPortName / SplitterName / LastAuthTime /
-// LastAuthResult. Requests are sequential (one after the other, no
-// concurrency) per user request.
+// onQueryFetchDetails walks the checked rows and calls queryOnuInfo for each
+// customer account, filling in the detail columns (账号状态 / ONU 运行状态 /
+// PON 口名称 / 分光器名称 / 最后上线时间 / 最后离线时间 / 最后离线原因).
+// Requests are sequential (no concurrency). Requires a valid combineToken
+// obtained via the face-login step first.
 func (g *gui) onQueryFetchDetails() {
 	if g.queryBusy {
 		return
 	}
-	loginName := strings.TrimSpace(g.queryLoginEdit.Text())
-	if loginName == "" {
-		walk.MsgBox(g.mw, "提示", "请先在“工号”栏填写 loginName", walk.MsgBoxIconWarning)
+	tok := strings.TrimSpace(g.combineToken)
+	if tok == "" {
+		walk.MsgBox(g.mw, "提示", "请先点击“人脸登录”获取会话 token", walk.MsgBoxIconWarning)
 		return
 	}
 
@@ -136,49 +136,32 @@ func (g *gui) onQueryFetchDetails() {
 	g.queryHint.SetText(fmt.Sprintf("准备获取 %d 条详情……", len(targets)))
 
 	go func() {
-		ssoCli := sso.New()
-		tok, err := sso.EnsureToken(loginName, tokenCachePath(), ssoCli)
-		if err != nil {
-			g.mw.Synchronize(func() {
-				g.queryBusy = false
-				g.queryFetchBtn.SetEnabled(true)
-				g.queryFetchBtn.SetText("获取详情")
-				g.queryHint.SetText("SSO 失败：" + err.Error())
-			})
-			return
-		}
-		client, err := query.NewForwardClient(tok)
-		if err != nil {
-			g.mw.Synchronize(func() {
-				g.queryBusy = false
-				g.queryFetchBtn.SetEnabled(true)
-				g.queryFetchBtn.SetText("获取详情")
-				g.queryHint.SetText("初始化查询客户端失败：" + err.Error())
-			})
-			return
-		}
-		client.TokenProvider = func() (string, error) {
-			sso.Invalidate(tokenCachePath())
-			return sso.EnsureToken(loginName, tokenCachePath(), ssoCli)
-		}
+		client := query.NewOnuInfoClient(tok)
+		// 401 refresh: the token stored on gui is refreshed by TokenExpired.
+		client.TokenExpired = g.refreshCombineToken
 
-		// One-at-a-time (no concurrency).
 		for i, row := range targets {
-			resp, qerr := client.QueryDetail(row.CustomersAccount)
+			resp, qerr := client.Query(row.CustomersAccount)
 			done := i + 1
 			r := row
 			g.mw.Synchronize(func() {
 				if qerr != nil {
-					r.LastAuthResult = "错误: " + qerr.Error()
-				} else if resp != nil && resp.Code == 200 && resp.Data != nil {
-					ApplyDetail(r, resp.Data)
-				} else if resp != nil {
-					r.LastAuthResult = fmt.Sprintf("code=%d %s", resp.Code, resp.Msg)
+					r.LastDownCause = "错误: " + qerr.Error()
+				} else if resp == nil {
+					r.LastDownCause = "无响应"
+				} else if resp.Status == 0 && resp.Data != nil {
+					ApplyOnuInfo(r, resp.Data)
+				} else if resp.Status == 3 {
+					r.AccountStatus = "没有宽带"
+				} else {
+					r.LastDownCause = fmt.Sprintf("status=%d %s", resp.Status, resp.Message)
 				}
 				g.queryModel.PublishRowChangedFor(r)
 				g.queryHint.SetText(fmt.Sprintf("已获取 %d/%d", done, len(targets)))
 			})
 		}
+		// After every row was processed, save the (possibly refreshed) token.
+		saveCombineToken(g.combineToken)
 		g.mw.Synchronize(func() {
 			g.queryBusy = false
 			g.queryFetchBtn.SetEnabled(true)
@@ -186,6 +169,23 @@ func (g *gui) onQueryFetchDetails() {
 			g.queryHint.SetText(fmt.Sprintf("详情获取完成：%d 条", len(targets)))
 		})
 	}()
+}
+
+// refreshCombineToken re-runs the face-login flow using the last-known login
+// name and image path. Blocks the calling goroutine while the network calls
+// run. On success updates g.combineToken and returns the new value.
+func (g *gui) refreshCombineToken() (string, error) {
+	loginName := strings.TrimSpace(g.queryLoginEdit.Text())
+	imagePath := strings.TrimSpace(g.faceImageEdit.Text())
+	if loginName == "" || imagePath == "" {
+		return "", fmt.Errorf("请先在“工号”栏填写 loginName 并选择人脸图片")
+	}
+	tok, err := query.NewFaceLoginClient().Login(loginName, imagePath)
+	if err != nil {
+		return "", err
+	}
+	g.combineToken = tok
+	return tok, nil
 }
 
 // onBindInfoExport writes checked rows of the 绑定信息 table to a CSV picked

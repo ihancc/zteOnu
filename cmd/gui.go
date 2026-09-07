@@ -71,6 +71,10 @@ type gui struct {
 	// 光猫查询 tab (independent of the ONU-side flows above)
 	queryLoginEdit                  *walk.LineEdit
 	queryAccountEdit                *walk.LineEdit
+	faceImageEdit                   *walk.LineEdit
+	faceBrowseBtn, faceLoginBtn     *walk.PushButton
+	faceStatus                      *walk.Label
+	combineToken                    string
 	queryRunBtn                     *walk.PushButton
 	querySelAllBtn, querySelNoneBtn *walk.PushButton
 	querySelOfflineBtn              *walk.PushButton
@@ -406,6 +410,24 @@ func runGUI() {
 							Composite{
 								Layout: HBox{},
 								Children: []Widget{
+									Label{Text: "人脸图片"},
+									LineEdit{
+										AssignTo: &g.faceImageEdit,
+										ReadOnly: true,
+									},
+									PushButton{AssignTo: &g.faceBrowseBtn, Text: "浏览…", OnClicked: g.onFaceBrowse},
+									PushButton{AssignTo: &g.faceLoginBtn, Text: "人脸登录", OnClicked: g.onFaceLogin},
+									Label{
+										AssignTo:  &g.faceStatus,
+										Text:      "未登录",
+										TextColor: walk.RGB(0x66, 0x66, 0x66),
+									},
+									HSpacer{},
+								},
+							},
+							Composite{
+								Layout: HBox{},
+								Children: []Widget{
 									PushButton{
 										AssignTo:  &g.queryRunBtn,
 										Text:      "查询",
@@ -504,8 +526,8 @@ func runGUI() {
 									{Title: "ONU 运行状态", Width: 90},
 									{Title: "PON 口名称", Width: 200},
 									{Title: "分光器名称", Width: 200},
-									{Title: "最后认证时间", Width: 130},
-									{Title: "最后认证结果", Width: 90},
+									{Title: "最后上线时间", Width: 130},
+									{Title: "最后离线原因", Width: 130},
 								},
 							},
 						},
@@ -590,11 +612,77 @@ func runGUI() {
 	}
 
 	g.appendLog(fmt.Sprintf("%s\r\n就绪 - 设置参数后点击运行\r\n", version.Line()))
-	// Prime the CMCC-query 工号 from disk so users don't re-type each launch.
+	// Prime the CMCC-query 工号, face image path and combineToken from disk
+	// so users don't re-enter them each launch.
 	if saved := loadSavedLoginName(); saved != "" {
 		g.queryLoginEdit.SetText(saved)
 	}
+	if saved := loadSavedFaceImage(); saved != "" {
+		g.faceImageEdit.SetText(saved)
+	}
+	if saved := loadSavedCombineToken(); saved != "" {
+		g.combineToken = saved
+		g.faceStatus.SetText("已加载缓存 token")
+	}
 	g.mw.Run()
+}
+
+// onFaceBrowse opens a file dialog for the user to pick a face-login image.
+// Image filename (without extension) is treated as the 工号 - when the top
+// 工号 field is empty, it's auto-filled from the basename.
+func (g *gui) onFaceBrowse() {
+	dlg := new(walk.FileDialog)
+	dlg.Title = "选择人脸图片（文件名即工号）"
+	dlg.Filter = "图片 (*.jpg;*.jpeg;*.png)|*.jpg;*.jpeg;*.png|所有文件 (*.*)|*.*"
+	dlg.FilterIndex = 1
+	if ok, err := dlg.ShowOpen(g.mw); err != nil {
+		walk.MsgBox(g.mw, "错误", err.Error(), walk.MsgBoxIconError)
+		return
+	} else if !ok {
+		return
+	}
+	g.faceImageEdit.SetText(dlg.FilePath)
+	saveFaceImagePath(dlg.FilePath)
+	if strings.TrimSpace(g.queryLoginEdit.Text()) == "" {
+		name := strings.TrimSuffix(filepath.Base(dlg.FilePath), filepath.Ext(dlg.FilePath))
+		g.queryLoginEdit.SetText(name)
+		saveLoginName(name)
+	}
+}
+
+// onFaceLogin runs the face-login sequence (csrf → upload → login) and stores
+// the resulting combineToken. loginName is derived from the image basename.
+func (g *gui) onFaceLogin() {
+	imagePath := strings.TrimSpace(g.faceImageEdit.Text())
+	if imagePath == "" {
+		walk.MsgBox(g.mw, "提示", "请先选择人脸图片", walk.MsgBoxIconWarning)
+		return
+	}
+	loginName := strings.TrimSuffix(filepath.Base(imagePath), filepath.Ext(imagePath))
+	if loginName == "" {
+		walk.MsgBox(g.mw, "提示", "图片文件名不能为空", walk.MsgBoxIconWarning)
+		return
+	}
+	if strings.TrimSpace(g.queryLoginEdit.Text()) == "" {
+		g.queryLoginEdit.SetText(loginName)
+		saveLoginName(loginName)
+	}
+	g.faceStatus.SetText("登录中……")
+	g.faceLoginBtn.SetEnabled(false)
+
+	go func() {
+		tok, err := query.NewFaceLoginClient().Login(loginName, imagePath)
+		g.mw.Synchronize(func() {
+			g.faceLoginBtn.SetEnabled(true)
+			if err != nil {
+				g.faceStatus.SetText("登录失败：" + err.Error())
+				return
+			}
+			g.combineToken = tok
+			saveCombineToken(tok)
+			g.faceStatus.SetText(fmt.Sprintf("登录成功（%s）", loginName))
+		})
+	}()
 }
 
 // syncMacFields enables the interface / MAC input that matches the selected
@@ -833,11 +921,38 @@ func appDataPath(name string) string {
 	return filepath.Join(dir, name)
 }
 
-// loginNameFilePath / tokenCachePath localize the two artifacts we persist for
-// the 光猫查询 tab: the plain work-number (so users don't retype it) and the
-// cached JWT (so we skip the SSO round-trip while it's fresh).
-func loginNameFilePath() string { return appDataPath("loginname.txt") }
-func tokenCachePath() string    { return appDataPath("sso_token.json") }
+// loginNameFilePath / tokenCachePath localize the artifacts we persist for
+// the 光猫查询 tab. combineToken (from face-login) is short-lived; we still
+// save it so the user avoids a re-login if the app restarts within its
+// validity window - on 401 the on-disk value is refreshed via face-login.
+func loginNameFilePath() string    { return appDataPath("loginname.txt") }
+func tokenCachePath() string       { return appDataPath("sso_token.json") }
+func faceImageFilePath() string    { return appDataPath("face_image.txt") }
+func combineTokenFilePath() string { return appDataPath("combine_token.txt") }
+
+func loadSavedFaceImage() string {
+	b, err := os.ReadFile(faceImageFilePath())
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+func saveFaceImagePath(p string) {
+	_ = os.WriteFile(faceImageFilePath(), []byte(strings.TrimSpace(p)), 0o600)
+}
+
+func loadSavedCombineToken() string {
+	b, err := os.ReadFile(combineTokenFilePath())
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+func saveCombineToken(tok string) {
+	_ = os.WriteFile(combineTokenFilePath(), []byte(strings.TrimSpace(tok)), 0o600)
+}
 
 func loadSavedLoginName() string {
 	b, err := os.ReadFile(loginNameFilePath())
