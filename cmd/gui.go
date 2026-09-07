@@ -59,6 +59,11 @@ type gui struct {
 	console                                     *tnet.Telnet
 	consoleBusy                                 bool
 
+	// status tab
+	statusText       *walk.TextEdit
+	statusRefreshBtn *walk.PushButton
+	statusHint       *walk.Label
+
 	ifaces []factory.InterfaceInfo
 
 	running bool
@@ -296,6 +301,31 @@ func runGUI() {
 									VSpacer{},
 								},
 							},
+							{
+								Title:  "状态",
+								Layout: VBox{},
+								Children: []Widget{
+									PushButton{
+										AssignTo:  &g.statusRefreshBtn,
+										Text:      "刷新状态",
+										OnClicked: g.onStatusRefresh,
+									},
+									Label{
+										AssignTo:  &g.statusHint,
+										Text:      "点“刷新状态”读取一次；使用永久 telnet（root/Zte521）",
+										TextColor: walk.RGB(0x66, 0x66, 0x66),
+									},
+									TextEdit{
+										AssignTo:      &g.statusText,
+										ReadOnly:      true,
+										VScroll:       true,
+										HScroll:       true,
+										Font:          Font{Family: "NSimSun", PointSize: 10},
+										CompactHeight: false,
+										Text:          "等待读取…",
+									},
+								},
+							},
 						},
 					},
 					VSpacer{},
@@ -485,6 +515,64 @@ func (g *gui) onCmdSend() {
 			if s := strings.TrimSpace(out); s != "" {
 				g.appendLog(normalizeNewlines(s) + "\r\n")
 			}
+		})
+	}()
+}
+
+// onStatusRefresh reads a fresh status snapshot from the ONU and shows it in
+// the status text panel. Reuses the command console's connection when it is
+// open (avoids reconnecting); otherwise dials a short-lived permanent telnet
+// session with root/Zte521 just for this fetch.
+func (g *gui) onStatusRefresh() {
+	if g.running {
+		walk.MsgBox(g.mw, "提示", "流程正在执行，请稍后再刷新", walk.MsgBoxIconWarning)
+		return
+	}
+	ip := strings.TrimSpace(g.ipEdit.Text())
+	telnetPort := atoiDefault(g.telnetPortEdit.Text(), 23)
+
+	g.statusRefreshBtn.SetEnabled(false)
+	g.statusHint.SetText("读取中……")
+	g.statusText.SetText("")
+
+	// Snapshot the console pointer so the goroutine sees a stable value.
+	consoleSess := g.console
+
+	go func() {
+		var (
+			out         string
+			err         error
+			ownedTelnet *tnet.Telnet
+		)
+		if consoleSess != nil {
+			out, err = onu.FetchStatus(consoleSess)
+		} else {
+			ownedTelnet, err = tnet.New("root", "Zte521", ip, telnetPort)
+			if err == nil {
+				if lerr := ownedTelnet.Login(); lerr != nil {
+					ownedTelnet.Conn.Close()
+					ownedTelnet = nil
+					err = fmt.Errorf("登录失败（永久 telnet 可能未开启）: %w", lerr)
+				}
+			}
+			if err == nil {
+				out, err = onu.FetchStatus(ownedTelnet)
+			}
+		}
+		if ownedTelnet != nil {
+			ownedTelnet.Conn.Close()
+		}
+		g.mw.Synchronize(func() {
+			g.statusRefreshBtn.SetEnabled(true)
+			if err != nil {
+				g.statusHint.SetText("读取失败")
+				g.statusText.SetText("[错误] " + err.Error() + "\r\n\r\n" +
+					"提示：先在“手动”页选“永久 telnet（重启服务）”开启永久 telnet；\r\n" +
+					"或在“命令”页点“连接”后再点“刷新状态”。")
+				return
+			}
+			g.statusHint.SetText("已读取")
+			g.statusText.SetText(normalizeNewlines(out))
 		})
 	}()
 }
