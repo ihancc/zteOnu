@@ -106,10 +106,20 @@ func itoa(n int) string {
 	return string(buf[i:])
 }
 
-// IsOnline reports whether a row is in the "在线" state. Any other value
-// (掉电 / 未知原因不在线 / 空) counts as offline and is what the UI highlights
-// and what the "选中非在线" button targets.
-func (r *QueryRow) IsOnline() bool { return r.OperState == "在线" }
+// IsOnline reports whether a row is in the "在线" state. The fresh value from
+// the compId=1230 detail step (ONURunState) is preferred over the initial
+// compId=1310 list value (OperState) when it has been populated; strings are
+// whitespace-trimmed so a stray "\r" or space cannot make an online row look
+// offline. Any non-"在线" value counts as offline (掉电 / 未知原因不在线 /
+// error / empty), which is what the UI highlights red and what the
+// "选中非在线" and "只显示非在线" toggles both key off.
+func (r *QueryRow) IsOnline() bool {
+	state := strings.TrimSpace(r.ONURunState)
+	if state == "" {
+		state = strings.TrimSpace(r.OperState)
+	}
+	return state == "在线"
+}
 
 // QueryTableModel is walk's TableView model backing the results table. It
 // implements walk.TableModel plus walk.ItemChecker so each row has a checkbox,
@@ -142,14 +152,16 @@ func (m *QueryTableModel) visible(r *QueryRow) bool {
 }
 
 // rebuildVisible walks allRows in current sort order and re-fills rows with
-// entries that pass the filter.
+// entries that pass the filter. A fresh slice (not the backing array of the
+// previous rows) is allocated so walk cannot observe a stale slice header.
 func (m *QueryTableModel) rebuildVisible() {
-	m.rows = m.rows[:0]
+	next := make([]*QueryRow, 0, len(m.allRows))
 	for _, r := range m.allRows {
 		if m.visible(r) {
-			m.rows = append(m.rows, r)
+			next = append(next, r)
 		}
 	}
+	m.rows = next
 }
 
 // SetShowOnlyOffline toggles the "只显示非在线" filter and republishes.

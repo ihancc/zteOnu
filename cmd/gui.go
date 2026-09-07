@@ -449,8 +449,19 @@ func runGUI() {
 									CheckBox{
 										AssignTo: &g.queryOfflineOnlyCB,
 										Text:     "只显示非在线",
-										OnCheckedChanged: func() {
-											g.queryModel.SetShowOnlyOffline(g.queryOfflineOnlyCB.Checked())
+										// OnClicked fires on every user click; using
+										// OnCheckedChanged has been observed to miss
+										// events in some walk builds.
+										OnClicked: func() {
+											on := g.queryOfflineOnlyCB.Checked()
+											g.queryModel.SetShowOnlyOffline(on)
+											// Force a repaint - PublishRowsReset alone
+											// occasionally leaves stale rows visible.
+											if g.queryTable != nil {
+												g.queryTable.Invalidate()
+											}
+											g.queryHint.SetText(fmt.Sprintf("过滤 %v：显示 %d/%d 行",
+												on, g.queryModel.RowCount(), len(g.queryModel.AllRows())))
 										},
 									},
 									Label{
