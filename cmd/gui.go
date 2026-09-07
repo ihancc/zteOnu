@@ -68,11 +68,16 @@ type gui struct {
 	statusHint       *walk.Label
 
 	// 光猫查询 tab (independent of the ONU-side flows above)
-	queryTokenEdit, queryAccountEdit *walk.LineEdit
-	queryRunBtn                      *walk.PushButton
-	queryHint                        *walk.Label
-	queryResult                      *walk.TextEdit
-	queryBusy                        bool
+	queryTokenEdit                  *walk.LineEdit
+	queryAccountsEdit               *walk.TextEdit
+	queryRunBtn                     *walk.PushButton
+	querySelAllBtn, querySelNoneBtn *walk.PushButton
+	queryExportBtn, queryClearBtn   *walk.PushButton
+	queryHint                       *walk.Label
+	queryTable                      *walk.TableView
+	queryModel                      *QueryTableModel
+	queryConcurrencyEdit            *walk.LineEdit
+	queryBusy                       bool
 
 	ifaces []factory.InterfaceInfo
 
@@ -105,6 +110,7 @@ func runGUI() {
 
 	g := &gui{}
 	g.ifaces = factory.Interfaces()
+	g.queryModel = NewQueryTableModel()
 
 	if err := (MainWindow{
 		AssignTo: &g.mw,
@@ -371,17 +377,33 @@ func runGUI() {
 						Children: []Widget{
 							GroupBox{
 								Title:  "查询设置",
-								Layout: Grid{Columns: 2},
+								Layout: VBox{},
 								Children: []Widget{
-									Label{Text: "combine-token"},
-									LineEdit{
-										AssignTo:  &g.queryTokenEdit,
-										CueBanner: "粘贴施工端 APP 的 combine-token",
+									Composite{
+										Layout: Grid{Columns: 4},
+										Children: []Widget{
+											Label{Text: "combine-token"},
+											LineEdit{
+												AssignTo:   &g.queryTokenEdit,
+												CueBanner:  "粘贴施工端 APP 的 combine-token",
+												ColumnSpan: 3,
+											},
+											Label{Text: "并发线程"},
+											LineEdit{
+												AssignTo:   &g.queryConcurrencyEdit,
+												Text:       "4",
+												MaxSize:    Size{Width: 60},
+												ColumnSpan: 3,
+											},
+										},
 									},
-									Label{Text: "账号 / 号码"},
-									LineEdit{
-										AssignTo:  &g.queryAccountEdit,
-										CueBanner: "例如 13800001111",
+									Label{Text: "账号列表（每行一个，可粘贴多行）"},
+									TextEdit{
+										AssignTo: &g.queryAccountsEdit,
+										VScroll:  true,
+										MinSize:  Size{Height: 90},
+										Font:     Font{Family: "NSimSun", PointSize: 10},
+										Text:     "",
 									},
 								},
 							},
@@ -390,24 +412,52 @@ func runGUI() {
 								Children: []Widget{
 									PushButton{
 										AssignTo:  &g.queryRunBtn,
-										Text:      "查询",
+										Text:      "批量查询",
 										OnClicked: g.onQueryRun,
+									},
+									PushButton{
+										AssignTo:  &g.querySelAllBtn,
+										Text:      "全选",
+										OnClicked: g.onQuerySelectAll,
+									},
+									PushButton{
+										AssignTo:  &g.querySelNoneBtn,
+										Text:      "全不选",
+										OnClicked: g.onQuerySelectNone,
+									},
+									PushButton{
+										AssignTo:  &g.queryExportBtn,
+										Text:      "导出选中 CSV",
+										OnClicked: g.onQueryExport,
+									},
+									PushButton{
+										AssignTo:  &g.queryClearBtn,
+										Text:      "清空",
+										OnClicked: g.onQueryClear,
 									},
 									Label{
 										AssignTo:  &g.queryHint,
-										Text:      "查询 PON 信息 + ONU 详情 + CMCCAdmin 密码；token 自动保存到 %APPDATA%/zteonu/token.txt",
+										Text:      "token 自动保存到 %APPDATA%/zteonu/token.txt",
 										TextColor: walk.RGB(0x66, 0x66, 0x66),
 									},
+									HSpacer{},
 								},
 							},
-							Label{Text: "查询结果"},
-							TextEdit{
-								AssignTo: &g.queryResult,
-								ReadOnly: true,
-								VScroll:  true,
-								HScroll:  true,
-								Font:     Font{Family: "NSimSun", PointSize: 10},
-								Text:     "填写 token 和账号后点“查询”。",
+							TableView{
+								AssignTo:         &g.queryTable,
+								AlternatingRowBG: true,
+								CheckBoxes:       true,
+								MultiSelection:   true,
+								ColumnsOrderable: true,
+								Model:            g.queryModel,
+								Columns: []TableViewColumn{
+									{Title: "账号", Width: 130},
+									{Title: "在线状态", Width: 90},
+									{Title: "OLT", Width: 180},
+									{Title: "POS 端口", Width: 120},
+									{Title: "ONU 设备", Width: 180},
+									{Title: "备注", Width: 300},
+								},
 							},
 						},
 					},
@@ -676,42 +726,130 @@ func saveToken(tok string) {
 	_ = os.WriteFile(tokenFilePath(), []byte(strings.TrimSpace(tok)), 0o600)
 }
 
-// onQueryRun looks up an account through the CMCC 施工端 APIs. Independent of
-// the ONU-side one-click / status flows: it can run concurrently.
+// parseAccounts splits a multi-line text into a de-duplicated list of accounts.
+func parseAccounts(text string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		line = strings.Trim(line, ",;\t\r")
+		line = strings.TrimSpace(line)
+		if line == "" || seen[line] {
+			continue
+		}
+		seen[line] = true
+		out = append(out, line)
+	}
+	return out
+}
+
+// onQueryRun runs queryPonInfo concurrently for each account in the text box
+// and streams the results into the table as they arrive.
 func (g *gui) onQueryRun() {
 	if g.queryBusy {
 		return
 	}
 	token := strings.TrimSpace(g.queryTokenEdit.Text())
-	account := strings.TrimSpace(g.queryAccountEdit.Text())
+	accounts := parseAccounts(g.queryAccountsEdit.Text())
 	if token == "" {
 		walk.MsgBox(g.mw, "提示", "请先填写 combine-token", walk.MsgBoxIconWarning)
 		return
 	}
-	if account == "" {
-		walk.MsgBox(g.mw, "提示", "请填写账号 / 号码", walk.MsgBoxIconWarning)
+	if len(accounts) == 0 {
+		walk.MsgBox(g.mw, "提示", "账号列表为空", walk.MsgBoxIconWarning)
 		return
 	}
 	saveToken(token)
 
+	concurrency := atoiDefault(g.queryConcurrencyEdit.Text(), 4)
+	if concurrency > 20 {
+		concurrency = 20
+	}
+
 	g.queryBusy = true
 	g.queryRunBtn.SetEnabled(false)
 	g.queryRunBtn.SetText("查询中…")
-	g.queryHint.SetText("请求中，请稍候……")
-	g.queryResult.SetText("")
+	g.queryModel.Reset()
+	g.queryHint.SetText(fmt.Sprintf("共 %d 个账号，并发 %d……", len(accounts), concurrency))
 
 	go func() {
 		client := query.New(token)
-		res := client.LookupAll(account)
-		text := query.FormatResult(res)
+		// Bounded-concurrency worker pool: each token from `sem` is one slot.
+		sem := make(chan struct{}, concurrency)
+		done := make(chan *QueryRow, len(accounts))
+		for _, acct := range accounts {
+			acct := acct
+			sem <- struct{}{}
+			go func() {
+				defer func() { <-sem }()
+				pon, _, err := client.QueryPonInfo(acct)
+				done <- buildQueryRowFromPon(acct, pon, err)
+			}()
+		}
+		completed := 0
+		for range accounts {
+			row := <-done
+			completed++
+			cnt := completed
+			g.mw.Synchronize(func() {
+				g.queryModel.Append(row)
+				g.queryHint.SetText(fmt.Sprintf("已完成 %d/%d", cnt, len(accounts)))
+			})
+		}
 		g.mw.Synchronize(func() {
 			g.queryBusy = false
 			g.queryRunBtn.SetEnabled(true)
-			g.queryRunBtn.SetText("查询")
-			g.queryHint.SetText("完成")
-			g.queryResult.SetText(normalizeNewlines(text))
+			g.queryRunBtn.SetText("批量查询")
+			g.queryHint.SetText(fmt.Sprintf("完成：%d 条", len(accounts)))
 		})
 	}()
+}
+
+func (g *gui) onQuerySelectAll()  { g.queryModel.SelectAll(true) }
+func (g *gui) onQuerySelectNone() { g.queryModel.SelectAll(false) }
+
+func (g *gui) onQueryClear() {
+	g.queryModel.Reset()
+	g.queryHint.SetText("已清空")
+}
+
+func (g *gui) onQueryExport() {
+	if g.queryModel.RowCount() == 0 {
+		walk.MsgBox(g.mw, "提示", "结果为空", walk.MsgBoxIconWarning)
+		return
+	}
+	// Count selected first so users don't get an empty file.
+	selCount := 0
+	for _, r := range g.queryModel.Rows() {
+		if r.Selected {
+			selCount++
+		}
+	}
+	if selCount == 0 {
+		walk.MsgBox(g.mw, "提示", "请先勾选要导出的行", walk.MsgBoxIconWarning)
+		return
+	}
+	dlg := new(walk.FileDialog)
+	dlg.Title = "导出选中行为 CSV"
+	dlg.Filter = "CSV 文件 (*.csv)|*.csv"
+	dlg.FilterIndex = 1
+	dlg.FilePath = "onu-query.csv"
+	if ok, err := dlg.ShowSave(g.mw); err != nil {
+		walk.MsgBox(g.mw, "错误", err.Error(), walk.MsgBoxIconError)
+		return
+	} else if !ok {
+		return
+	}
+	path := dlg.FilePath
+	if !strings.HasSuffix(strings.ToLower(path), ".csv") {
+		path += ".csv"
+	}
+	n, err := g.queryModel.ExportSelectedCSV(path)
+	if err != nil {
+		walk.MsgBox(g.mw, "错误", err.Error(), walk.MsgBoxIconError)
+		return
+	}
+	g.queryHint.SetText(fmt.Sprintf("已导出 %d 条到 %s", n, path))
 }
 
 func (g *gui) onRun() {
