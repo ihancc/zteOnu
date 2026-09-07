@@ -40,21 +40,20 @@ func TestBuildQueryRowsFromForward(t *testing.T) {
 		t.Errorf("row 1 wrong: %+v", rows[1])
 	}
 
-	// 500 → single note row.
+	// 500 → single row with the error text in OperState (备注 was removed;
+	// stuffing the message in OperState keeps the offline-row highlight).
 	r2 := buildQueryRowsFromForward("bad", &query.ForwardResponse{Code: 500, Msg: "未找到"}, nil)
-	if len(r2) != 1 || r2[0].Notes != "未找到" {
+	if len(r2) != 1 || r2[0].OperState != "未找到" {
 		t.Errorf("500 branch: %+v", r2)
 	}
-
-	// Transport error → single error row.
+	// Transport error → single row surfacing the error message.
 	r3 := buildQueryRowsFromForward("x", nil, errors.New("timeout"))
-	if len(r3) != 1 || r3[0].Notes != "timeout" {
+	if len(r3) != 1 || !strings.HasPrefix(r3[0].OperState, "错误:") {
 		t.Errorf("err branch: %+v", r3)
 	}
-
-	// 200 with empty data → single "no data" row (not zero rows).
+	// 200 with empty data → single "no data" row.
 	r4 := buildQueryRowsFromForward("y", &query.ForwardResponse{Code: 200}, nil)
-	if len(r4) != 1 || r4[0].Notes != "无邻居数据" {
+	if len(r4) != 1 || r4[0].OperState != "无邻居数据" {
 		t.Errorf("empty data branch: %+v", r4)
 	}
 }
@@ -78,7 +77,7 @@ func TestExportSelectedCSV(t *testing.T) {
 	m.Append(&QueryRow{Selected: true, QueryAccount: "q1", ONUID: "0",
 		OperState: "在线", AuthType: "MAC", AuthInfo: "AA:BB:CC"})
 	m.Append(&QueryRow{Selected: false, QueryAccount: "q2", ONUID: "1"})
-	m.Append(&QueryRow{Selected: true, QueryAccount: "q3", ONUID: "2", Notes: "err"})
+	m.Append(&QueryRow{Selected: true, QueryAccount: "q3", ONUID: "2", OperState: "err"})
 
 	path := filepath.Join(t.TempDir(), "out.csv")
 	n, err := m.ExportSelectedCSV(path)
@@ -134,6 +133,51 @@ func TestSelectByPredicate_OfflineOnly(t *testing.T) {
 		if got[i] != want[i] {
 			t.Errorf("row %d selected = %v, want %v", i, got[i], want[i])
 		}
+	}
+}
+
+func TestFormatLogTime(t *testing.T) {
+	if got := formatLogTime("20260902173746"); got != "2026-09-02 17:37:46" {
+		t.Errorf("formatLogTime = %q, want 2026-09-02 17:37:46", got)
+	}
+	// Unexpected length passes through unchanged.
+	if got := formatLogTime("---"); got != "---" {
+		t.Errorf("passthrough failed: %q", got)
+	}
+}
+
+func TestFilter_ShowOnlyOffline(t *testing.T) {
+	m := NewQueryTableModel()
+	m.AppendMany([]*QueryRow{
+		{QueryAccount: "a", OperState: "在线"},
+		{QueryAccount: "b", OperState: "掉电"},
+		{QueryAccount: "c", OperState: "在线"},
+		{QueryAccount: "d", OperState: "未知原因不在线"},
+	})
+	if m.RowCount() != 4 {
+		t.Fatalf("unfiltered count = %d, want 4", m.RowCount())
+	}
+	m.SetShowOnlyOffline(true)
+	if m.RowCount() != 2 {
+		t.Errorf("filtered count = %d, want 2", m.RowCount())
+	}
+	for _, r := range m.Rows() {
+		if r.IsOnline() {
+			t.Errorf("online row leaked through filter: %+v", r)
+		}
+	}
+	// Adding while filter is on: online row must not appear.
+	m.Append(&QueryRow{QueryAccount: "e", OperState: "在线"})
+	m.Append(&QueryRow{QueryAccount: "f", OperState: "掉电"})
+	if m.RowCount() != 3 {
+		t.Errorf("filtered count after append = %d, want 3", m.RowCount())
+	}
+	if got := len(m.AllRows()); got != 6 {
+		t.Errorf("allRows count = %d, want 6", got)
+	}
+	m.SetShowOnlyOffline(false)
+	if m.RowCount() != 6 {
+		t.Errorf("unfiltered count after toggle = %d, want 6", m.RowCount())
 	}
 }
 

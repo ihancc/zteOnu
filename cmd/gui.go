@@ -74,6 +74,8 @@ type gui struct {
 	queryRunBtn                     *walk.PushButton
 	querySelAllBtn, querySelNoneBtn *walk.PushButton
 	querySelOfflineBtn              *walk.PushButton
+	queryFetchBtn                   *walk.PushButton
+	queryOfflineOnlyCB              *walk.CheckBox
 	queryExportBtn, queryClearBtn   *walk.PushButton
 	queryHint                       *walk.Label
 	queryTable                      *walk.TableView
@@ -127,8 +129,8 @@ func runGUI() {
 	if err := (MainWindow{
 		AssignTo: &g.mw,
 		Title:    "ZTE ONU 工具",
-		MinSize:  Size{Width: 860, Height: 540},
-		Size:     Size{Width: 1000, Height: 660},
+		MinSize:  Size{Width: 900, Height: 560},
+		Size:     Size{Width: 1100, Height: 680},
 		Layout:   VBox{},
 		Children: []Widget{
 			TabWidget{
@@ -430,6 +432,11 @@ func runGUI() {
 										},
 									},
 									PushButton{
+										AssignTo:  &g.queryFetchBtn,
+										Text:      "获取详情",
+										OnClicked: g.onQueryFetchDetails,
+									},
+									PushButton{
 										AssignTo:  &g.queryExportBtn,
 										Text:      "导出选中 CSV",
 										OnClicked: g.onQueryExport,
@@ -438,6 +445,13 @@ func runGUI() {
 										AssignTo:  &g.queryClearBtn,
 										Text:      "清空",
 										OnClicked: g.onQueryClear,
+									},
+									CheckBox{
+										AssignTo: &g.queryOfflineOnlyCB,
+										Text:     "只显示非在线",
+										OnCheckedChanged: func() {
+											g.queryModel.SetShowOnlyOffline(g.queryOfflineOnlyCB.Checked())
+										},
 									},
 									Label{
 										AssignTo:  &g.queryHint,
@@ -468,14 +482,20 @@ func runGUI() {
 									}
 								},
 								Columns: []TableViewColumn{
-									{Title: "查询账号", Width: 110},
-									{Title: "ONU 序号", Width: 70},
-									{Title: "状态", Width: 100},
-									{Title: "认证类型", Width: 70},
-									{Title: "认证信息", Width: 140},
-									{Title: "客户号码", Width: 110},
-									{Title: "最后离线时间", Width: 140},
-									{Title: "备注", Width: 200},
+									{Title: "查询账号", Width: 90},
+									{Title: "ONU 序号", Width: 65},
+									{Title: "状态", Width: 70},
+									{Title: "认证类型", Width: 60},
+									{Title: "认证信息", Width: 120},
+									{Title: "客户号码", Width: 95},
+									{Title: "最后离线时间", Width: 130},
+									{Title: "密码", Width: 90},
+									{Title: "账号状态", Width: 60},
+									{Title: "ONU 运行状态", Width: 90},
+									{Title: "PON 口名称", Width: 200},
+									{Title: "分光器名称", Width: 200},
+									{Title: "最后认证时间", Width: 130},
+									{Title: "最后认证结果", Width: 90},
 								},
 							},
 						},

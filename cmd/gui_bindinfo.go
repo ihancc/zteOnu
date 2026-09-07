@@ -103,6 +103,91 @@ func (g *gui) onBindInfoRun() {
 	}()
 }
 
+// onQueryFetchDetails walks the checked rows and calls scene/security/forward
+// with compId=1230 for each customer account, filling in Password /
+// AccountStatus / ONURunState / PonPortName / SplitterName / LastAuthTime /
+// LastAuthResult. Requests are sequential (one after the other, no
+// concurrency) per user request.
+func (g *gui) onQueryFetchDetails() {
+	if g.queryBusy {
+		return
+	}
+	loginName := strings.TrimSpace(g.queryLoginEdit.Text())
+	if loginName == "" {
+		walk.MsgBox(g.mw, "提示", "请先在“工号”栏填写 loginName", walk.MsgBoxIconWarning)
+		return
+	}
+
+	// Snapshot which rows to fetch (checked + non-empty customer account).
+	var targets []*QueryRow
+	for _, r := range g.queryModel.AllRows() {
+		if r.Selected && strings.TrimSpace(r.CustomersAccount) != "" {
+			targets = append(targets, r)
+		}
+	}
+	if len(targets) == 0 {
+		walk.MsgBox(g.mw, "提示", "请先勾选要获取详情的行（客户号码非空）", walk.MsgBoxIconWarning)
+		return
+	}
+
+	g.queryBusy = true
+	g.queryFetchBtn.SetEnabled(false)
+	g.queryFetchBtn.SetText("获取中…")
+	g.queryHint.SetText(fmt.Sprintf("准备获取 %d 条详情……", len(targets)))
+
+	go func() {
+		ssoCli := sso.New()
+		tok, err := sso.EnsureToken(loginName, tokenCachePath(), ssoCli)
+		if err != nil {
+			g.mw.Synchronize(func() {
+				g.queryBusy = false
+				g.queryFetchBtn.SetEnabled(true)
+				g.queryFetchBtn.SetText("获取详情")
+				g.queryHint.SetText("SSO 失败：" + err.Error())
+			})
+			return
+		}
+		client, err := query.NewForwardClient(tok)
+		if err != nil {
+			g.mw.Synchronize(func() {
+				g.queryBusy = false
+				g.queryFetchBtn.SetEnabled(true)
+				g.queryFetchBtn.SetText("获取详情")
+				g.queryHint.SetText("初始化查询客户端失败：" + err.Error())
+			})
+			return
+		}
+		client.TokenProvider = func() (string, error) {
+			sso.Invalidate(tokenCachePath())
+			return sso.EnsureToken(loginName, tokenCachePath(), ssoCli)
+		}
+
+		// One-at-a-time (no concurrency).
+		for i, row := range targets {
+			resp, qerr := client.QueryDetail(row.CustomersAccount)
+			done := i + 1
+			r := row
+			g.mw.Synchronize(func() {
+				if qerr != nil {
+					r.LastAuthResult = "错误: " + qerr.Error()
+				} else if resp != nil && resp.Code == 200 && resp.Data != nil {
+					ApplyDetail(r, resp.Data)
+				} else if resp != nil {
+					r.LastAuthResult = fmt.Sprintf("code=%d %s", resp.Code, resp.Msg)
+				}
+				g.queryModel.PublishRowChangedFor(r)
+				g.queryHint.SetText(fmt.Sprintf("已获取 %d/%d", done, len(targets)))
+			})
+		}
+		g.mw.Synchronize(func() {
+			g.queryBusy = false
+			g.queryFetchBtn.SetEnabled(true)
+			g.queryFetchBtn.SetText("获取详情")
+			g.queryHint.SetText(fmt.Sprintf("详情获取完成：%d 条", len(targets)))
+		})
+	}()
+}
+
 // onBindInfoExport writes checked rows of the 绑定信息 table to a CSV picked
 // by the user.
 func (g *gui) onBindInfoExport() {

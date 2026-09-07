@@ -46,6 +46,46 @@ type BindInfoResponse struct {
 	Data *BindInfoData `json:"data"`
 }
 
+// DetailData is the per-ONU detail payload returned when compId=1230 is used
+// with a single customer account. Field names come from the observed wire
+// format; the ones the UI displays are onuPasswd / orderStatus / OperState /
+// spos, but keeping the rest here means callers get the full context.
+type DetailData struct {
+	OrderStatus      string `json:"orderStatus"`
+	OrderStatusValue string `json:"orderStatusValue"`
+	AdminState       string `json:"AdminState"`
+	OperState        string `json:"OperState"`
+	OnuPasswd        string `json:"onuPasswd"`
+	OnuSN            string `json:"onuSn"`
+	OnuName          string `json:"onuName"`
+	Spos             string `json:"spos"`
+	OltName          string `json:"olt"`
+	OltIP            string `json:"oltIp"`
+	OltPort          string `json:"oltPort"`
+	OltVendor        string `json:"oltVendor"`
+	UserBand         string `json:"userBand"`
+	AccessMethods    string `json:"accessMethodsName"`
+	CityName         string `json:"cityName"`
+	CustomerName     string `json:"customerName"`
+	CustomersAccount string `json:"customersAccount"`
+	OnlineTime       string `json:"onlineTime"`
+	BindInfo         string `json:"bindinfo"`
+	StdAddress       string `json:"stdAddress"`
+	LogTime          string `json:"logTime"`        // 最后一次认证时间 (yyyyMMddHHmmss)
+	BmsOperateType   string `json:"bmsOperateType"` // 最后一次认证结果 (认证成功 / …)
+	RxPower          string `json:"RxPower"`
+	TxPower          string `json:"TxPower"`
+	PRxPower         string `json:"PRxPower"`
+	PTxPower         string `json:"PTxPower"`
+}
+
+// DetailResponse envelopes a DetailData object.
+type DetailResponse struct {
+	Code int         `json:"code"`
+	Msg  string      `json:"msg"`
+	Data *DetailData `json:"data"`
+}
+
 // DeviceItem is one ONU under the target account's PON port. The 施工 App /
 // scene/security/forward endpoint returns a list of these when compId=1310 -
 // i.e. all neighbors on the same PON as the queried broadband account.
@@ -173,8 +213,49 @@ func (c *ForwardClient) QueryBindInfo(account string) (*BindInfoResponse, error)
 	return c.doBindInfo(account)
 }
 
-// bindInfoRequest is the compId=317 flavor of the request body: matches the
-// shape 查限速批量.js sends (no ponName field).
+// QueryDetail hits scene/security/forward with compId=1230 to pull the full
+// per-ONU detail (onuPasswd / orderStatus / OperState / spos / …) for the
+// given customer account. On 401 it refreshes the token once and retries.
+func (c *ForwardClient) QueryDetail(account string) (*DetailResponse, error) {
+	resp, err := c.doDetail(account)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Code != 401 || c.TokenProvider == nil {
+		return resp, nil
+	}
+	newTok, err := c.TokenProvider()
+	if err != nil {
+		return resp, fmt.Errorf("token 过期，刷新失败：%w", err)
+	}
+	c.Token = newTok
+	return c.doDetail(account)
+}
+
+func (c *ForwardClient) doDetail(account string) (*DetailResponse, error) {
+	body, err := json.Marshal(bindInfoRequest{
+		Account: account, AppFlag: "T", CompID: "1230", IsApp: "N",
+	})
+	if err != nil {
+		return nil, err
+	}
+	raw, err := c.postForward(body)
+	if err != nil {
+		return nil, err
+	}
+	if raw == nil {
+		return &DetailResponse{Code: 401, Msg: "HTTP 401"}, nil
+	}
+	var r DetailResponse
+	if err := json.Unmarshal(raw, &r); err != nil {
+		return nil, fmt.Errorf("解析详情响应失败：%w（body：%s）", err, truncateStr(string(raw), 200))
+	}
+	return &r, nil
+}
+
+// bindInfoRequest is the compId=317/1230 flavor of the request body: no
+// ponName field. Reused as-is by QueryBindInfo (compId=317) and QueryDetail
+// (compId=1230), which differ only in the CompID field.
 type bindInfoRequest struct {
 	Account   string `json:"account"`
 	AppFlag   string `json:"appFlag"`
