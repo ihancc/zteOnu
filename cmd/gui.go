@@ -77,7 +77,6 @@ type gui struct {
 	queryHint                       *walk.Label
 	queryTable                      *walk.TableView
 	queryModel                      *QueryTableModel
-	queryConcurrencyEdit            *walk.LineEdit
 	queryBusy                       bool
 
 	// 绑定信息 tab (compId=317 single-account view)
@@ -388,18 +387,12 @@ func runGUI() {
 						Layout: VBox{},
 						Children: []Widget{
 							Composite{
-								Layout: Grid{Columns: 6},
+								Layout: Grid{Columns: 4},
 								Children: []Widget{
 									Label{Text: "工号"},
 									LineEdit{
 										AssignTo:  &g.queryLoginEdit,
 										CueBanner: "loginName，如 tt_wangbang",
-									},
-									Label{Text: "并发线程"},
-									LineEdit{
-										AssignTo: &g.queryConcurrencyEdit,
-										Text:     "4",
-										MaxSize:  Size{Width: 60},
 									},
 									Label{Text: "账号"},
 									LineEdit{
