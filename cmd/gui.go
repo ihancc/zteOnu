@@ -200,8 +200,8 @@ func runGUI() {
 									},
 									CheckBox{
 										AssignTo: &g.reopenCB,
-										Text:     "完成后重新开启 telnet（便于重连）",
-										Checked:  true,
+										Text:     "完成后再获取一次临时 telnet 验证（多等一次重启）",
+										Checked:  false,
 									},
 									PushButton{
 										AssignTo:  &g.oneBtn,
@@ -210,7 +210,7 @@ func runGUI() {
 									},
 									Label{
 										AssignTo:  &g.oneStatus,
-										Text:      "流程: 永久telnet → 集采→重启 → 写SN/密码 → 区域→重启 →(重开telnet)",
+										Text:      "流程: 临时telnet → 集采→重启 → 写SN/密码 → 区域→重启（全程只用临时telnet）",
 										TextColor: walk.RGB(0x66, 0x66, 0x66),
 									},
 									VSpacer{},
