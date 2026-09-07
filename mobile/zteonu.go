@@ -98,7 +98,7 @@ func OpenPermanentTelnet(ip string, httpPort int, telnetPort int, facUser string
 // ports of the 4031 bridge (bit0=LAN1..bit3=LAN4, 15 = all four); rebootAfter
 // reboots once more so the new WAN connections take effect. Progress is
 // streamed to log.
-func RunOneClick(ip string, httpPort int, telnetPort int, facUser string, facPass string, mac string, sn string, password string, xgpon bool, regionID int, ensureWAN bool, bridgePortMask int, rebootAfter bool, log Logger) error {
+func RunOneClick(ip string, httpPort int, telnetPort int, facUser string, facPass string, mac string, sn string, password string, xgpon bool, regionID int, ensureWAN bool, bridgePortMask int, rebootAfter bool, ensureRxOffset bool, rxMaxAbsDBm float64, rxTargetAbsDBm float64, log Logger) error {
 	pon := onu.GPON
 	if xgpon {
 		pon = onu.XGPON
@@ -115,6 +115,9 @@ func RunOneClick(ip string, httpPort int, telnetPort int, facUser string, facPas
 		EnsureWAN:         ensureWAN,
 		BridgePortMask:    bridgePortMask,
 		RebootAfterEnsure: rebootAfter,
+		EnsureRxOffset:    ensureRxOffset,
+		RxMaxAbsDBm:       rxMaxAbsDBm,
+		RxTargetAbsDBm:    rxTargetAbsDBm,
 	})
 }
 

@@ -162,7 +162,10 @@ class MainActivity : AppCompatActivity() {
             try {
                 Zteonu.runOneClick(
                     ip, httpPort, telnetPort, facUser, facPass, mac,
-                    sn, pass, xgpon, regionID, ensureWAN, bridgePortMask, rebootAfter, uiLogger
+                    sn, pass, xgpon, regionID, ensureWAN, bridgePortMask, rebootAfter,
+                    // RX-offset step: enabled by default with 25/23 dB thresholds.
+                    true, 25.0, 23.0,
+                    uiLogger
                 )
             } catch (e: Exception) {
                 runOnUiThread { appendLog("[错误] " + (e.message ?: e.toString()) + "\r\n") }

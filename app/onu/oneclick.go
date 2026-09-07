@@ -52,6 +52,10 @@ type OneClickOptions struct {
 	EnsureWAN         bool // check/create 4034 TR069 + 4031 bridge after region reboot
 	BridgePortMask    int  // LAN-port bitmap for the 4031 bridge (bit0=LAN1..bit3=LAN4, 15 = all)
 	RebootAfterEnsure bool // reboot once more after creating WAN entries to apply
+
+	EnsureRxOffset bool    // when set, run the RX-offset step at the very end
+	RxMaxAbsDBm    float64 // trigger threshold in dB (default 25 when zero)
+	RxTargetAbsDBm float64 // target |RX| in dB (default 23 when zero)
 }
 
 // RunOneClick provisions the ONU end to end using TEMPORARY telnet only:
@@ -107,7 +111,7 @@ func RunOneClick(o OneClickOptions) error {
 	applySdefconfThenReboot(t, o.RegionID, log)
 	t = nil // applySdefconfThenReboot closed the connection
 
-	if !o.EnsureWAN {
+	if !o.EnsureWAN && !o.EnsureRxOffset {
 		logf(log, "完成：设备正在以新配置重启")
 		return nil
 	}
@@ -119,17 +123,27 @@ func RunOneClick(o OneClickOptions) error {
 	}
 	defer nt.Conn.Close()
 
-	logf(log, "== 步骤 5：检查并创建 WAN 连接（4034 TR069 / 4031 桥接）==")
-	if err := EnsureWANConnections(nt, o.BridgePortMask, log); err != nil {
-		return err
+	if o.EnsureWAN {
+		logf(log, "== 步骤 5：检查并创建 WAN 连接（4034 TR069 / 4031 桥接）==")
+		if err := EnsureWANConnections(nt, o.BridgePortMask, log); err != nil {
+			return err
+		}
 	}
-	if o.RebootAfterEnsure {
+
+	if o.EnsureRxOffset {
+		logf(log, "== 步骤 6：检查 RX 光功率并按需补偿 ==")
+		if err := EnsureRxOffset(nt, o.RxMaxAbsDBm, o.RxTargetAbsDBm, log); err != nil {
+			return err
+		}
+	}
+
+	if o.EnsureWAN && o.RebootAfterEnsure {
 		logf(log, "正在重启设备以使新 WAN 连接生效……")
 		_ = nt.Reboot()
-		logf(log, "完成：设备正在重启，新 WAN 连接将随之生效")
+		logf(log, "完成：设备正在重启，新配置将随之生效")
 		return nil
 	}
-	logf(log, "完成：WAN 连接检查/创建已结束")
+	logf(log, "完成：所有可选步骤结束")
 	return nil
 }
 

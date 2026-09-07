@@ -47,6 +47,8 @@ type gui struct {
 	ponCB, regionCB                *walk.ComboBox
 	ensureWANCB, rebootAfterCB     *walk.CheckBox
 	lan1CB, lan2CB, lan3CB, lan4CB *walk.CheckBox
+	ensureRxCB                     *walk.CheckBox
+	rxMaxEdit, rxTargetEdit        *walk.LineEdit
 	oneBtn                         *walk.PushButton
 	oneStatus                      *walk.Label
 
@@ -218,6 +220,20 @@ func runGUI() {
 										AssignTo: &g.rebootAfterCB,
 										Text:     "创建 WAN 连接后再重启一次（使连接立即生效）",
 										Checked:  true,
+									},
+									CheckBox{
+										AssignTo: &g.ensureRxCB,
+										Text:     "RX 光功率超阈值时自动补偿（写 OPTICAL.RxOffset）",
+										Checked:  true,
+									},
+									Composite{
+										Layout: HBox{},
+										Children: []Widget{
+											Label{Text: "|RX| 阈值 (dB)"},
+											LineEdit{AssignTo: &g.rxMaxEdit, Text: "25"},
+											Label{Text: "目标 |RX| (dB)"},
+											LineEdit{AssignTo: &g.rxTargetEdit, Text: "23"},
+										},
 									},
 									PushButton{
 										AssignTo:  &g.oneBtn,
@@ -523,6 +539,9 @@ func (g *gui) onOneClick() {
 		mask = 15 // fallback: bind all if user unchecked everything
 	}
 
+	rxMax := parseFloatDefault(g.rxMaxEdit.Text(), 25)
+	rxTarget := parseFloatDefault(g.rxTargetEdit.Text(), 23)
+
 	o := onu.OneClickOptions{
 		Options:           g.collectOptions(),
 		SN:                sn,
@@ -532,6 +551,9 @@ func (g *gui) onOneClick() {
 		EnsureWAN:         g.ensureWANCB.Checked(),
 		BridgePortMask:    mask,
 		RebootAfterEnsure: g.rebootAfterCB.Checked(),
+		EnsureRxOffset:    g.ensureRxCB.Checked(),
+		RxMaxAbsDBm:       rxMax,
+		RxTargetAbsDBm:    rxTarget,
 	}
 
 	g.setRunning(true)
@@ -584,6 +606,15 @@ func (g *gui) execFlow(opts onu.Options, action int) (user, pass string, ok bool
 func atoiDefault(s string, def int) int {
 	if n, err := strconv.Atoi(strings.TrimSpace(s)); err == nil && n > 0 {
 		return n
+	}
+	return def
+}
+
+// parseFloatDefault parses a decimal number from user text, falling back to def
+// on any parse error or non-positive value.
+func parseFloatDefault(s string, def float64) float64 {
+	if v, err := strconv.ParseFloat(strings.TrimSpace(s), 64); err == nil && v > 0 {
+		return v
 	}
 	return def
 }
